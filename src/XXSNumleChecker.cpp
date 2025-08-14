@@ -30,11 +30,16 @@ void XXSNumleChecker::set_num(const std::string &num)
 
 int XXSNumleChecker::contained(const std::string &num, const std::string &guess)
 {
-    std::unordered_set<char> guess_numbers(guess.begin(), guess.end());
-    int ret = 0;
-    for(auto &digit : num)
+    bool guess_digits[10] = {false};
+    for (char c : guess)
     {
-        if(guess_numbers.count(digit))
+        guess_digits[c - '0'] = true;
+    }
+
+    int ret = 0;
+    for (char c : num)
+    {
+        if (guess_digits[c - '0'])
         {
             ret++;
         }

@@ -132,9 +132,20 @@ const std::unordered_set<std::string> &XXSNumleSolver::get_set() const
 long double XXSNumleSolver::calc_possibility(const std::unordered_set<std::string> &set,
                                              const std::string &guess, int contained,int matching)
 {
-    std::unordered_set<std::string> restricted_set(set);
-    XXSNumleSolver::restrict_set(restricted_set, guess, contained, matching);
-    return static_cast<long double>(restricted_set.size()) / set.size();
+    if (set.empty())
+    {
+        return 0.0;
+    }
+    size_t count = 0;
+    for (const auto& s : set)
+    {
+        if (XXSNumleChecker::contained(s, guess) == contained &&
+            XXSNumleChecker::matching(s, guess) == matching)
+        {
+            count++;
+        }
+    }
+    return static_cast<long double>(count) / set.size();
 }
 
 long double XXSNumleSolver::calc_entropy(const std::unordered_set<std::string> &set,
@@ -164,24 +175,27 @@ void entropy_worker(
     const std::vector<std::string> *guesses,
     std::unordered_map<std::string, long double> *mge,
     std::mutex *mutex,
-    int *progress,
-    bool b_show_progress)
+    std::atomic<int> *progress,
+    bool b_show_progress,
+    int total_guesses)
 {
+    std::unordered_map<std::string, long double> local_mge;
     for (const auto& g : *guesses)
     {
         long double entropy = XXSNumleSolver::calc_entropy(*set, *pcm, g);
-        
-        std::lock_guard<std::mutex> lock(*mutex);
-        (*mge)[g] = entropy;
-        (*progress)++;
-        
+        local_mge[g] = entropy;
+
         if (b_show_progress)
         {
+            int p = (*progress)++;
             XXSConsole con;
             con.write("Guess : ").write(g).write("    Entropy : ").write(entropy);
-            con.write("\033[60G").write(*progress).write(" / ").write(guesses->size() * std::thread::hardware_concurrency()).new_line();
+            con.write("\033[60G").write(p).write(" / ").write(total_guesses).new_line();
         }
     }
+
+    std::lock_guard<std::mutex> lock(*mutex);
+    mge->insert(local_mge.begin(), local_mge.end());
 }
 
 std::unordered_map<std::string, long double> XXSNumleSolver::calc_guess_entropy_map(
@@ -192,9 +206,10 @@ std::unordered_map<std::string, long double> XXSNumleSolver::calc_guess_entropy_
 {
     std::unordered_map<std::string, long double> mge;
     std::mutex mutex;
-    int progress = 0;
+    std::atomic<int> progress(1);
 
     unsigned int num_threads = std::thread::hardware_concurrency();
+    if (num_threads == 0) num_threads = 1; // Fallback
     std::vector<std::thread> threads;
     std::vector<std::vector<std::string>> thread_guesses(num_threads);
 
@@ -205,7 +220,7 @@ std::unordered_map<std::string, long double> XXSNumleSolver::calc_guess_entropy_
 
     for (unsigned int i = 0; i < num_threads; ++i)
     {
-        threads.emplace_back(entropy_worker, &set, &pcm, &thread_guesses[i], &mge, &mutex, &progress, b_show_progress);
+        threads.emplace_back(entropy_worker, &set, &pcm, &thread_guesses[i], &mge, &mutex, &progress, b_show_progress, guesses.size());
     }
 
     for (auto& t : threads)
