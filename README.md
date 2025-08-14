@@ -15,7 +15,8 @@
 
 ## 如何使用
 
-安装 python3
+需事先安装 python3、uv
 ``` sh
-python3 main.py
+uv sync
+uv run main.py
 ```
