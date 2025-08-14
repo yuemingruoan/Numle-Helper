@@ -1,141 +1,223 @@
-from collections import defaultdict
+import numpy as np
+import math
+import time
+import sys
 
-class InteractiveWordleSolver:
-    def __init__(self, word_length=5):
-        self.word_length = word_length
-        self.filename = f"split_results/words_len_{word_length}.txt"
-        self.possible_words = []  # 可能单词集合（动态加载）
+class InteractiveNumleSolver:
+    def __init__(self, digit_length=5):
+        self.digit_length = digit_length
+        self.possible_combinations = np.empty((0, self.digit_length), dtype=np.uint8)
+        self.all_combinations = self.generate_all_combinations()
         
-    def load_word_list(self):
-        """从文件加载单词列表"""
-        with open(self.filename, 'r') as f:
-            return [line.strip() for line in f if len(line.strip()) == self.word_length]
+    def generate_all_combinations(self):
+        """生成所有可能的数字组合"""
+        digits = np.arange(10, dtype=np.uint8)
+        grids = np.meshgrid(*([digits]*self.digit_length))
+        return np.stack(grids, axis=-1).reshape(-1, self.digit_length)
     
     def get_next_guess(self):
-        """获取下一个猜测（基于字母频率）"""
-        # 如果可能单词集为空，重新加载文件
-        if not self.possible_words:
-            self.possible_words = self.load_word_list()
+        """获取下一个猜测"""
+        if len(self.possible_combinations) == 0:
+            self.possible_combinations = self.all_combinations.copy()
             
-        if not self.possible_words:
+        if len(self.possible_combinations) == 0:
             return None
             
-        # 计算字母位置频率
-        freq = [defaultdict(int) for _ in range(self.word_length)]
-        for word in self.possible_words:
-            for i, char in enumerate(word):
-                freq[i][char] += 1
-                
-        # 选择总分最高的单词
-        best_word = None
-        best_score = -1
+        # 计算每个位置数字频率（优化后的向量化实现）
+        sample_size = min(1000, len(self.possible_combinations))
+        candidates = self.possible_combinations[:sample_size]
         
-        for word in self.possible_words:
-            score = sum(freq[i][char] for i, char in enumerate(word))
-            if score > best_score:
-                best_score = score
-                best_word = word
-                
-        return best_word
+        # 计算每个候选的熵
+        entropies = np.zeros(len(candidates))
+        for i in range(self.digit_length):
+            # 计算当前位的数字频率
+            unique, counts = np.unique(self.possible_combinations[:, i], return_counts=True)
+            freq = np.zeros(10, dtype=np.float64)
+            freq[unique] = counts / len(self.possible_combinations)
+            
+            # 计算当前位对熵的贡献
+            p = freq[candidates[:, i]]
+            entropies += np.where(p > 0, -p * np.log2(p), 0)
+        
+        best_idx = np.argmax(entropies)
+        return ''.join(map(str, candidates[best_idx]))
+        
+    @staticmethod
+    def check(secret, guess):
+        """检查模式"""
+        secret = np.array(list(map(int, secret)))
+        guess = np.array(list(map(int, guess)))
+        
+        if len(secret) != len(guess):
+            raise ValueError("秘密数字和猜测数字长度不一致")
+            
+        correct_positions = (secret == guess).sum()
+        
+        secret_counts = np.bincount(secret, minlength=10)
+        guess_counts = np.bincount(guess, minlength=10)
+        correct_digits = np.minimum(secret_counts, guess_counts).sum()
+        
+        return {
+            "total_digits": correct_digits,
+            "correct_positions": correct_positions
+        }
     
-    def update_possible_words(self, guess, feedback):
-        """根据反馈更新可能单词集合"""
-        # 重新从文件加载所有单词
-        all_words = self.load_word_list()
-        new_possible = []
+    def update_possible_combinations(self, guess, total_correct, positions_correct):
+        """更新可能数字组合"""
+        if len(self.possible_combinations) == 0:
+            return
+            
+        guess_arr = np.array(list(map(int, guess)), dtype=np.uint8)
         
-        for word in all_words:
-            # 跳过已被排除的单词
-            if word in self.possible_words or not self.possible_words:
-                valid = True
-                # 临时计数器（用于处理重复字母）
-                word_counter = defaultdict(int)
-                for char in word:
-                    word_counter[char] += 1
-                    
-                # 检查绿色（正确位置）
-                for i, (g_char, fb) in enumerate(zip(guess, feedback)):
-                    if fb == 'G':
-                        if word[i] != g_char:
-                            valid = False
-                            break
-                        else:
-                            word_counter[g_char] -= 1
-                
-                if not valid:
-                    continue
-                    
-                # 检查黄色（存在但位置错误）
-                for i, (g_char, fb) in enumerate(zip(guess, feedback)):
-                    if fb == 'Y':
-                        if word[i] == g_char or g_char not in word or word_counter[g_char] == 0:
-                            valid = False
-                            break
-                        else:
-                            word_counter[g_char] -= 1
-                
-                if not valid:
-                    continue
-                    
-                # 检查灰色（不存在）
-                for i, (g_char, fb) in enumerate(zip(guess, feedback)):
-                    if fb == 'X':
-                        if g_char in word and word_counter[g_char] > 0:
-                            valid = False
-                            break
-                
-                if valid:
-                    new_possible.append(word)
-                    
-        self.possible_words = new_possible
+        correct_positions = (self.possible_combinations == guess_arr).sum(axis=1)
+        
+        secret_counts = np.zeros((len(self.possible_combinations), 10), dtype=np.uint8)
+        for i in range(10):
+            secret_counts[:, i] = (self.possible_combinations == i).sum(axis=1)
+            
+        guess_counts = np.bincount(guess_arr, minlength=10)
+        total_digits = np.minimum(secret_counts, guess_counts).sum(axis=1)
+        
+        mask = (total_digits == total_correct) & (correct_positions == positions_correct)
+        self.possible_combinations = self.possible_combinations[mask]
     
     def solve_interactive(self, max_attempts=6):
         """交互式求解主函数"""
-        print(f"Wordle 求解器已启动（{self.word_length}字母单词）")
-        print(f"使用单词表: {self.filename}")
+        print(f"Numle 求解器已启动（{self.digit_length}位数字）")
+        print("提示：游戏反馈应包含两个数字：")
+        print("  1. 总共包含的数字数量（无论位置）")
+        print("  2. 位置也正确的数字数量")
         
         attempt = 1
-        while attempt <= max_attempts:
-            # 初始加载单词表
-            if not self.possible_words:
-                self.possible_words = self.load_word_list()
+        while True:
+            if len(self.possible_combinations) == 0:
+                self.possible_combinations = self.all_combinations.copy()
                 
             guess = self.get_next_guess()
             if guess is None:
-                print("无有效单词可猜，游戏结束")
+                print("无有效数字可猜，游戏结束")
                 return False
                 
-            print(f"\n尝试 #{attempt}: 我猜: {guess.upper()}")
+            print(f"\n尝试 #{attempt}: 我猜: {guess}")
             
             while True:
-                feedback = input("请输入反馈（G=绿/Y=黄/X=灰），或输入'no'表示单词不存在: ").strip().upper()
+                feedback = input("请输入反馈（格式：包含数字数量 位置正确数量）: ").split()
                 
-                if feedback == 'NO':
-                    print(f"已标记 {guess} 为无效单词")
-                    # 直接从当前可能单词集中移除
-                    if guess in self.possible_words:
-                        self.possible_words.remove(guess)
-                    break
-                
-                # 验证反馈格式
-                if len(feedback) != self.word_length or any(char not in 'GYX' for char in feedback):
-                    print(f"格式错误！请输入{self.word_length}位G/Y/X组合（例如：GXXYG）")
+                if len(feedback) != 2:
+                    print("格式错误！请输入两个数字（例如：3 1）")
                     continue
-                
-                # 处理有效反馈
-                if feedback == 'G' * self.word_length:
-                    print(f"\n成功！单词是：{guess.upper()}")
+                    
+                try:
+                    total_correct = int(feedback[0])
+                    positions_correct = int(feedback[1])
+                except ValueError:
+                    print("格式错误！请输入两个整数数字（例如：3 1）")
+                    continue
+                    
+                if total_correct < 0 or positions_correct < 0 or total_correct > self.digit_length or positions_correct > total_correct:
+                    print(f"数字范围错误！总包含数应在0-{self.digit_length}之间，位置正确数应在0-总包含数之间")
+                    continue
+                    
+                if positions_correct == self.digit_length:
+                    print(f"\n成功！数字是：{guess}")
                     return True
                     
-                self.update_possible_words(guess, feedback)
-                print(f"剩余可能单词数: {len(self.possible_words)}")
-                attempt += 1  # 消耗尝试次数
+                self.update_possible_combinations(guess, total_correct, positions_correct)
+                print(f"剩余可能组合数: {len(self.possible_combinations)}")
+                attempt += 1
                 break
                 
-        print("\n未能在指定次数内猜出单词")
-        return False
-
 if __name__ == "__main__":
-    long=int(input("请输入单词长度："))
-    solver = InteractiveWordleSolver(long)
-    solver.solve_interactive()
+    print("Numle 助手 - 选择模式:")
+    print("1. 检查模式 (check)")
+    print("2. 求解模式 (solve)")
+    print("3. 自动遍历测试")
+    mode = input("请输入模式编号: ").strip()
+    
+    if mode == "1":
+        secret = input("请输入谜底数字: ").strip()
+        print("\n进入检查模式，输入'q'退出")
+        while True:
+            guess = input("请输入猜测数字: ").strip()
+            if guess.lower() == 'q':
+                print("退出检查模式")
+                break
+                
+            try:
+                result = InteractiveNumleSolver.check(secret, guess)
+                print(f"结果: 包含数字: {result['total_digits']}, 位置正确: {result['correct_positions']}")
+            except ValueError as e:
+                print(f"错误: {e}")
+    elif mode == "2":
+        length = int(input("请输入数字长度: "))
+        solver = InteractiveNumleSolver(length)
+        solver.solve_interactive()
+    elif mode == "3":
+        length = int(input("请输入数字长度: "))
+        solver = InteractiveNumleSolver(length)
+        print("\n开始自动遍历测试...")
+        
+        start_time = time.time()
+        total_tests = len(solver.all_combinations)
+        success_count = 0
+        total_attempts = 0
+        max_attempts = 0
+        
+        current_test = 0
+        try:
+            for secret in solver.all_combinations:
+                current_test += 1
+                print(f"进度: {current_test}/{total_tests}", end="\r")
+                solver.possible_combinations = solver.all_combinations.copy()
+                attempt = 1
+                solved = False
+                
+                while True:
+                    guess = solver.get_next_guess()
+                    if guess is None:
+                        break
+                        
+                    result = solver.check(''.join(map(str, secret)), guess)
+                    total_correct = result['total_digits']
+                    positions_correct = result['correct_positions']
+                    
+                    if positions_correct == solver.digit_length:
+                        solved = True
+                        success_count += 1
+                        total_attempts += attempt
+                        if attempt > max_attempts:
+                            max_attempts = attempt
+                        break
+                        
+                    solver.update_possible_combinations(guess, total_correct, positions_correct)
+                    attempt += 1
+        except KeyboardInterrupt:
+            print("\n\n测试被中断，显示当前统计结果:")
+            end_time = time.time()
+            total_time = end_time - start_time
+            print(f"已完成测试数: {current_test}/{total_tests}")
+            print(f"成功次数: {success_count}")
+            if current_test > 0:
+                print(f"当前成功率: {success_count/current_test*100:.2f}%")
+            if success_count > 0:
+                print(f"平均猜测次数: {total_attempts/success_count:.2f}")
+                print(f"最高猜测次数: {max_attempts}")
+            print(f"当前总耗时: {total_time:.2f}秒")
+            if current_test > 0:
+                print(f"平均每个测试耗时: {total_time/current_test:.4f}秒")
+            sys.exit(0)
+                
+        end_time = time.time()
+        total_time = end_time - start_time
+        print(f"\n测试完成！结果:")
+        print(f"测试总数: {total_tests}")
+        print(f"成功次数: {success_count}")
+        print(f"成功率: {success_count/total_tests*100:.2f}%")
+        if success_count > 0:
+            print(f"平均猜测次数: {total_attempts/success_count:.2f}")
+            print(f"最高猜测次数: {max_attempts}")
+        print(f"总耗时: {total_time:.2f}秒")
+        if total_tests > 0:
+            print(f"平均每个测试耗时: {total_time/total_tests:.4f}秒")
+    else:
+        print("无效模式选择")
