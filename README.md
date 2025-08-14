@@ -13,89 +13,9 @@
     *   能够自动计算并推荐当前局面下的**最佳猜测**（即信息熵最高的猜测）。
     *   支持生成和读取预计算表，以加快求解速度。
 
-## 如何编译
-
-本项目使用 CMake 进行构建。请确保您的系统已安装 C++ 编译器 (支持 C++11 或更高版本) 和 CMake。
-
-```bash
-# 1. 克隆仓库
-git clone <your-repo-url>
-cd <project-directory>
-
-# 2. 创建 build 目录
-mkdir build
-cd build
-
-# 3. 运行 CMake 和 Make
-cmake ..
-make
-
-# 4. 运行程序
-./XXSLibrary
-```
-
 ## 如何使用
 
-程序启动后，您会看到一个 `>` 提示符。您可以输入以下命令：
-
-### 主模式
-
-*   `check [number]`
-    *   进入**检查模式**。如果提供了 `[number]`，则将其作为谜底。否则，程序会提示您输入谜底。
-*   `solve [digits]`
-    *   进入**求解模式**。`[digits]` 是谜底的位数，默认为 `5`。
-*   `quit`
-    *   退出程序。
-
-### 检查模式 (`check`)
-
-进入此模式后，直接输入您想检查的数字，程序会返回 `Contained` (包含的数字个数) 和 `Matching` (位置正确的数字个数)。
-
-*   `back`: 返回主模式。
-
-**示例:**
+安装 python3
+``` sh
+python3 main.py
 ```
-> check 12345
-Check mode : 12345
-> 54321
-Contained : 5  Matching : 1
-> back
-Switched to main mode.
-```
-
-### 求解模式 (`solve`)
-
-这是最常用的模式。您需要根据游戏给您的反馈，不断输入线索来缩小可能性范围。
-
-*   `[guess] [contained] [matching]`
-    *   输入您的猜测、游戏返回的包含数字个数和位置正确数字个数。程序会根据此线索进行计算。
-    *   例如: `12345 2 1`
-
-*   `list`
-    *   列出当前所有可能的谜底。
-
-*   `size`
-    *   显示当前还剩下多少种可能的谜底。
-
-*   `entropy [guess]`
-    *   计算指定猜测 `[guess]` 的信息熵。如果不提供 `[guess]`，会提示您输入。
-
-*   `best`
-    *   计算并显示当前局面下的最佳猜测及其信息熵。
-
-*   `back`
-    *   返回主模式。
-
-**示例:**
-```
-> solve
-Solver mode : 5 digits
-> best
-Best guess : 11234   Entropy : 5.53241
-> 11234 2 1
-Remained possibles : 240
-Information Content : 3.80735
-> best
-Best guess : 15567   Entropy : 4.23412
-> list
-12500 12502 12503 ...
