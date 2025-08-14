@@ -218,6 +218,13 @@ int main()
                     long double info_content = ns.restrict(guess, contained, matching);
                     con.write("Remained possibles : ").write(ns.get_set_size()).new_line();
                     con.write("Information Content : ").write(info_content).new_line();
+                    
+                    // 当只剩一种可能性时，直接输出结果
+                    if (ns.get_set_size() == 1) {
+                        con.write("唯一可能的答案是: ");
+                        const auto& remaining_set = ns.get_set();
+                        con.write(*remaining_set.begin()).new_line();
+                    }
                 }
             }
         }
