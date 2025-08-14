@@ -73,14 +73,13 @@ public:
     static long double calc_possibility(const std::unordered_set<std::string> &set, const std::string &guess, int contained, int matching);
     static std::unordered_map<std::string, long double> calc_guess_entropy_map(const std::unordered_set<std::string> &set, const std::vector<std::pair<int, int>> &pcm, const std::unordered_set<std::string> &guesses, bool b_show_progress = false);
     static std::pair<std::string, long double> find_best_guess(const std::unordered_set<std::string> &set, const std::vector<std::pair<int, int>> &pcm, const std::unordered_set<std::string> &guesses, bool b_show_progress = false);
+    static bool is_valid_hint(const std::unordered_set<std::string> &set, const std::string &guess, int contained, int matching);
 private:
     int m_n;
     std::unordered_set<std::string> m_set;
     std::unordered_set<std::string> m_guesses;
     std::vector<std::pair<int, int>> m_pcm;
-    std::unordered_map<
-        std::string,
-        std::pair<int, int>> m_history;
+    std::unordered_map<std::string, std::pair<int, int>> m_history;
     std::unordered_map<
         std::unordered_map<
             std::string,
@@ -93,3 +92,4 @@ private:
 
 
 #endif //XXSLIBRARY_XXSNUMLESOLVER_H
+

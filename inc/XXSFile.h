@@ -28,7 +28,11 @@ public:
     const std::string &get_filename() const;
     const std::string &get_data() const;
 
-    void load();
+    /**
+     * @brief 加载文件数据进 data
+     * @return 是否成功加载文件
+     */
+    bool load();
     void save();
 
     // 以下四个函数操作的是 data! 不是文件本身! 是把文件 load 到 data 后操作 data, 再把它 write 进文件

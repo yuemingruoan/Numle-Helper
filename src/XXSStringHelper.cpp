@@ -3,10 +3,24 @@
 //
 
 #include "XXSStringHelper.h"
+#include "XXSDefines.h"
 
-#if !defined(XXS_PLATFORM_WINDOWS)
+#include <sstream>
+#include <iomanip>
+#include <algorithm>
+#include <cctype>
+// 添加 codecvt 头文件的条件编译
+#if defined(XXS_PLATFORM_WINDOWS)
+#include <Windows.h>
+#else
+// 只在非 Windows 平台上检查是否支持 codecvt
+#if __cplusplus >= 201703L && defined(_LIBCPP_VERSION)
+// libc++ 在 C++17 中弃用了 codecvt，但在某些版本中仍可用
+#define USE_CODECVT 0
+#else
+#define USE_CODECVT 1
 #include <codecvt>
-#include <locale>
+#endif
 #endif
 
 /**
@@ -86,8 +100,23 @@ std::string XXSStringHelper::cast(const std::wstring& wstr)
     delete[] buf;
     return str_ret;
 #else
+#if USE_CODECVT
     std::wstring_convert<std::codecvt_utf8<wchar_t>> conv;
     return conv.to_bytes(wstr);
+#else
+    // 使用更现代的方法实现宽字符串到字符串的转换
+    if (wstr.empty()) return std::string();
+    
+    size_t size = wcstombs(nullptr, wstr.c_str(), 0);
+    if (size == static_cast<size_t>(-1)) {
+        // 转换失败，返回空字符串
+        return std::string();
+    }
+    
+    std::string result(size, '\0');
+    wcstombs(&result[0], wstr.c_str(), size);
+    return result;
+#endif
 #endif
 }
 
@@ -100,7 +129,7 @@ std::wstring XXSStringHelper::cast(const std::string& str)
 {
 #if defined(XXS_PLATFORM_WINDOWS)
     std::wstring wstr_ret;
-    int len = MultiByteToWideChar(CP_UTF8, 0, str.c_c_str(), static_cast<int>(str.size()), nullptr, 0);
+    int len = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), static_cast<int>(str.size()), nullptr, 0);
     auto buf = new wchar_t[len + 1];
     MultiByteToWideChar(CP_UTF8, 0, str.c_str(), static_cast<int>(str.size()), buf, len);
     buf[len] = 0;
@@ -108,8 +137,23 @@ std::wstring XXSStringHelper::cast(const std::string& str)
     delete[] buf;
     return wstr_ret;
 #else
+#if USE_CODECVT
     std::wstring_convert<std::codecvt_utf8<wchar_t>> conv;
     return conv.from_bytes(str);
+#else
+    // 使用更现代的方法实现字符串到宽字符串的转换
+    if (str.empty()) return std::wstring();
+    
+    size_t size = mbstowcs(nullptr, str.c_str(), 0);
+    if (size == static_cast<size_t>(-1)) {
+        // 转换失败，返回空字符串
+        return std::wstring();
+    }
+    
+    std::wstring result(size, L'\0');
+    mbstowcs(&result[0], str.c_str(), size);
+    return result;
+#endif
 #endif
 }
 

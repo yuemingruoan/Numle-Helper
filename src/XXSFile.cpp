@@ -55,11 +55,16 @@ const std::string &XXSFile::get_data() const
 
 /**
  * @brief 加载文件数据进 data
+ * @return 是否成功加载文件
  */
-void XXSFile::load()
+bool XXSFile::load()
 {
     std::fstream fs;
     fs.open(this->m_filename, std::ios::in | std::ios::binary);
+    if (!fs.is_open()) {
+        return false;
+    }
+    
     XXSStringHelper sh;
     std::string str_line;
     while(std::getline(fs, str_line))
@@ -68,6 +73,7 @@ void XXSFile::load()
     }
     fs.close();
     this->m_data = sh.str();
+    return true;
 }
 
 /**

@@ -5,6 +5,8 @@
 #include "XXSLogger.h"
 #include "XXSNumleChecker.h"
 #include "XXSNumleSolver.h"
+#include "gpu/GpuSolverFactory.h"
+#include <cctype>
 
 std::vector<std::string> get_line_parts(XXSConsole &con)
 {
@@ -28,6 +30,12 @@ int main()
     XXSConsole::init_encoding();
     XXSConsole::enable_ansi_esc_codes(true);
     XXSConsole con;
+
+    // 在程序启动时显示计算后端信息
+    {
+        auto solver = ::GpuSolverFactory::createSolver();
+        con.write("使用计算后端: ").write(solver->getBackendName()).new_line();
+    }
 
     while(true)
     {
@@ -163,16 +171,6 @@ int main()
                     con.write("   Entropy : ").write(best_guess_entropy.second).new_line();
                     continue;
                 }
-                if(subcmd[0] == "make_table")
-                {
-                    std::string filename = "table.txt";
-                    if(subcmd.size() > 1)
-                    {
-                        filename = subcmd[1];
-                    }
-                    ns.make_table(filename);
-                    continue;
-                }
                 if(subcmd[0] == "read_table")
                 {
                     std::string filename = "table.txt";
@@ -209,6 +207,14 @@ int main()
                     int contained = std::stoi(subcmd[1]);
                     int matching = std::stoi(subcmd[2]);
 
+                    // 验证提示是否与当前解集相容
+                    if (!XXSNumleSolver::is_valid_hint(ns.get_set(), guess, contained, matching)) {
+                        con.set_text_color(0xffff00); // 黄色警告
+                        con.write("[WARN] 输入的提示与当前可能解集不相容!").new_line();
+                        con.write("      这可能导致解集变空，请检查输入是否正确").new_line();
+                        con.reset_color();
+                    }
+                    
                     long double info_content = ns.restrict(guess, contained, matching);
                     con.write("Remained possibles : ").write(ns.get_set_size()).new_line();
                     con.write("Information Content : ").write(info_content).new_line();
