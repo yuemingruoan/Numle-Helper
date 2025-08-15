@@ -13,70 +13,91 @@ class InteractiveNumleSolver:
         return np.stack(grids, axis=-1).reshape(-1, self.digit_length)
     
     def get_next_guess(self):
-        """获取下一个猜测"""
+        """获取下一个猜测（全向量化评分）"""
         if len(self.possible_combinations) == 0:
-            self.possible_combinations = self.all_combinations.copy()
+            # 直接复用基表，避免不必要的 copy
+            self.possible_combinations = self.all_combinations
             
         if len(self.possible_combinations) == 0:
             return None
-            
-        # 计算每个位置数字频率（优化后的向量化实现）
-        sample_size = min(1000, len(self.possible_combinations))
-        candidates = self.possible_combinations[:sample_size]
-        
-        # 计算每个候选的熵
-        entropies = np.zeros(len(candidates))
-        for i in range(self.digit_length):
-            # 计算当前位的数字频率
-            unique, counts = np.unique(self.possible_combinations[:, i], return_counts=True)
-            freq = np.zeros(10, dtype=np.float64)
-            freq[unique] = counts / len(self.possible_combinations)
-            
-            # 计算当前位对熵的贡献
-            p = freq[candidates[:, i]]
-            entropies += np.where(p > 0, -p * np.log2(p), 0)
-        
-        best_idx = np.argmax(entropies)
+
+        # 候选全集
+        candidates = self.possible_combinations
+
+        # 统计每一列(位置)的数字分布: counts[pos, digit] in [0..N]
+        L = self.digit_length
+        N = len(candidates)
+        counts = np.empty((L, 10), dtype=np.int32)
+        for i in range(L):
+            counts[i] = np.bincount(candidates[:, i], minlength=10)
+
+        # 概率与信息贡献表 contrib[pos, digit] = -p*log2(p); p=0 时贡献 0
+        freq = counts.astype(np.float32) / float(N)
+        contrib = np.zeros_like(freq, dtype=np.float32)
+        mask = freq > 0
+        contrib[mask] = -freq[mask] * np.log2(freq[mask])
+
+        # 对所有候选一次性取出其在每个位置的贡献并求和
+        entropies = contrib[np.arange(L)[:, None], candidates.T].sum(axis=0)
+
+        best_idx = int(np.argmax(entropies))
         return ''.join(map(str, candidates[best_idx]))
         
     @staticmethod
     def check(secret, guess):
-        """检查模式"""
-        secret = np.array(list(map(int, secret)))
-        guess = np.array(list(map(int, guess)))
-        
-        if len(secret) != len(guess):
+        """检查模式（高效字符串转数字与矢量化计数）"""
+        # 假定仅含 0-9 字符；若格式不正确可在调用端校验
+        s = np.frombuffer(secret.encode('ascii'), dtype=np.uint8) - 48
+        g = np.frombuffer(guess.encode('ascii'), dtype=np.uint8) - 48
+
+        if s.size != g.size:
             raise ValueError("秘密数字和猜测数字长度不一致")
-            
-        correct_positions = (secret == guess).sum()
-        
-        secret_counts = np.bincount(secret, minlength=10)
-        guess_counts = np.bincount(guess, minlength=10)
-        correct_digits = np.minimum(secret_counts, guess_counts).sum()
-        
+
+        correct_positions = int((s == g).sum())
+
+        secret_counts = np.bincount(s, minlength=10)
+        guess_counts = np.bincount(g, minlength=10)
+        correct_digits = int(np.minimum(secret_counts, guess_counts).sum())
+
         return {
             "total_digits": correct_digits,
             "correct_positions": correct_positions
         }
     
     def update_possible_combinations(self, guess, total_correct, positions_correct):
-        """更新可能数字组合"""
+        """更新可能数字组合（全向量化过滤）"""
         if len(self.possible_combinations) == 0:
             return
-            
-        guess_arr = np.array(list(map(int, guess)), dtype=np.uint8)
-        
+
+        guess_arr = np.frombuffer(guess.encode('ascii'), dtype=np.uint8) - 48
+
+        # 先用“位置正确数”做早期裁剪，减少后续工作量
         correct_positions = (self.possible_combinations == guess_arr).sum(axis=1)
-        
-        secret_counts = np.zeros((len(self.possible_combinations), 10), dtype=np.uint8)
-        for i in range(10):
-            secret_counts[:, i] = (self.possible_combinations == i).sum(axis=1)
-            
+        pos_mask = (correct_positions == positions_correct)
+        if not np.any(pos_mask):
+            # 无匹配，直接置空
+            self.possible_combinations = self.possible_combinations[:0]
+            return
+
+        cand = self.possible_combinations[pos_mask]
+        N, L = cand.shape
+
+        # 为每行构建 0..9 的计数：使用单次 np.bincount 完成
+        rows = np.repeat(np.arange(N), L)
+        vals = cand.reshape(-1)
+        idx = rows * 10 + vals
+        counts_flat = np.bincount(idx, minlength=N * 10)
+        secret_counts = counts_flat.reshape(N, 10)
+
         guess_counts = np.bincount(guess_arr, minlength=10)
+
         total_digits = np.minimum(secret_counts, guess_counts).sum(axis=1)
-        
-        mask = (total_digits == total_correct) & (correct_positions == positions_correct)
-        self.possible_combinations = self.possible_combinations[mask]
+
+        mask = (total_digits == total_correct)
+
+        # 组合位置掩码与数字掩码
+        final = np.where(pos_mask)[0][mask]
+        self.possible_combinations = self.possible_combinations[final]
     
     def solve_interactive(self, max_attempts=6):
         """交互式求解主函数"""
@@ -88,7 +109,7 @@ class InteractiveNumleSolver:
         attempt = 1
         while True:
             if len(self.possible_combinations) == 0:
-                self.possible_combinations = self.all_combinations.copy()
+                self.possible_combinations = self.all_combinations
                 
             guess = self.get_next_guess()
             if guess is None:
