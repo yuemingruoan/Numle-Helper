@@ -7,38 +7,6 @@ from tqdm import tqdm
 
 # 进程内全局 Solver 缓存，用于复用生成的大规模组合，降低任务初始化开销
 _G_SOLVER = None
-
-def _solve_secret_worker(args):
-    """
-    工作进程函数：对单个谜底执行求解，返回 (success, attempts)
-    使用进程内全局缓存的 Solver，避免每个任务重复初始化与生成组合。
-    """
-    try:
-        secret, length = args
-        global _G_SOLVER
-        solver = _G_SOLVER
-        if solver is None or getattr(solver, "digit_length", None) != length:
-            # 首次进入该进程或长度变化时，仅初始化一次
-            solver = InteractiveNumleSolver(length)
-            _G_SOLVER = solver
-
-        # 每个任务仅重置候选空间，复用 all_combinations
-        solver.possible_combinations = solver.all_combinations.copy()
-        attempt = 1
-        while True:
-            guess = solver.get_next_guess()
-            if guess is None:
-                return False, attempt - 1
-            result = InteractiveNumleSolver.check(''.join(map(str, secret)), guess)
-            total_correct = result['total_digits']
-            positions_correct = result['correct_positions']
-            if positions_correct == solver.digit_length:
-                return True, attempt
-            solver.update_possible_combinations(guess, total_correct, positions_correct)
-            attempt += 1
-    except KeyboardInterrupt:
-        return False, 1
-
 # 新增：范围批处理工作进程，减少 IPC 与任务调度开销
 def _solve_range_worker(args):
     """
