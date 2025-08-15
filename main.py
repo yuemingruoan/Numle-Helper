@@ -4,40 +4,50 @@ import time
 import sys
 import multiprocessing as mp
 from tqdm import tqdm
+import numpy as np
 
 # 进程内全局 Solver 缓存，用于复用生成的大规模组合，降低任务初始化开销
 _G_SOLVER = None
 # 新增：范围批处理工作进程，减少 IPC 与任务调度开销
 def _solve_range_worker(args):
     """
-    工作进程函数：一次性处理一段谜底范围，返回聚合统计
+    工作进程函数：处理 [start, end) 范围内的谜底索引，返回聚合统计
     返回: (processed, success_count, total_attempts, max_attempts)
     """
     try:
-        secrets_slice, length = args
+        start, end, length = args
         global _G_SOLVER
         solver = _G_SOLVER
         if solver is None or getattr(solver, "digit_length", None) != length:
+            # 若父进程未预热或长度不匹配，则在子进程按需构建
             solver = InteractiveNumleSolver(length)
             _G_SOLVER = solver
+
+        all_secrets = solver.all_combinations
+        check_fn = InteractiveNumleSolver.check
+        L = solver.digit_length
 
         processed = 0
         success_count = 0
         total_attempts = 0
         max_attempts = 0
 
-        for secret in secrets_slice:
-            # 重置解算器状态以复用 all_combinations
-            solver.possible_combinations = solver.all_combinations.copy()
+        for idx in range(start, end):
+            secret_arr = all_secrets[idx]
+            # 预先构造一次 ASCII 字符串，避免循环内重复拼接
+            secret_str = (secret_arr + 48).tobytes().decode('ascii')
+
+            # 重置解算器状态以复用 all_combinations（不复制）
+            solver.possible_combinations = solver.all_combinations
             attempt = 1
             while True:
                 guess = solver.get_next_guess()
                 if guess is None:
                     break
-                result = InteractiveNumleSolver.check(''.join(map(str, secret)), guess)
+                result = check_fn(secret_str, guess)
                 total_correct = result['total_digits']
                 positions_correct = result['correct_positions']
-                if positions_correct == solver.digit_length:
+                if positions_correct == L:
                     success_count += 1
                     total_attempts += attempt
                     if attempt > max_attempts:
@@ -103,19 +113,23 @@ def test(
     try:
         if processes is None or processes == 1:
             # 单进程
+            check_fn = InteractiveNumleSolver.check
+            L = solver.digit_length
             for secret in tqdm(all_secrets, desc="测试进度", unit="题"):
-                # 重置解算器状态
-                solver.possible_combinations = solver.all_combinations.copy()
+                # 预先构造一次 ASCII 字符串，避免循环内重复拼接
+                secret_str = (secret + 48).tobytes().decode('ascii')
+                # 重置解算器状态（不复制）
+                solver.possible_combinations = solver.all_combinations
                 attempt = 1
                 while True:
                     guess = solver.get_next_guess()
                     if guess is None:
                         break
-                    result = InteractiveNumleSolver.check(''.join(map(str, secret)), guess)
+                    result = check_fn(secret_str, guess)
                     total_correct = result['total_digits']
                     positions_correct = result['correct_positions']
                     
-                    if positions_correct == solver.digit_length:
+                    if positions_correct == L:
                         success_count += 1
                         total_attempts += attempt
                         if attempt > max_attempts:
@@ -126,12 +140,27 @@ def test(
                     attempt += 1
                 processed += 1
         else:
-            # 多进程：将全部可能谜底按进程数等分，分别一次性下发到各进程处理
+            # 多进程：基于索引区间分发任务，避免传输大数组切片；并复用父进程预热的 Solver
             procs = mp.cpu_count() if processes in (0, -1) else max(1, processes)
             procs = min(procs, total_tests)  # 不要创建多于任务数量的进程
-            # 预先切片（一次性传完其被分配的范围）
-            size = (total_tests + procs - 1) // procs  # 向上取整
-            tasks = [ (all_secrets[i:i+size], length) for i in range(0, total_tests, size) ]
+
+            # 预热：将父进程已构造的 Solver 通过 fork 共享到子进程，避免子进程重复构建基表
+            global _G_SOLVER
+            _G_SOLVER = solver
+
+            # 计算批大小：用户传入优先；否则自动估算为约 procs*4 个批次
+            if chunksize and chunksize > 0:
+                batch_size = int(chunksize)
+            else:
+                target_tasks = max(procs * 4, 1)
+                batch_size = max(1, (total_tests + target_tasks - 1) // target_tasks)
+
+            # 构造索引区间任务
+            tasks = []
+            for start_idx in range(0, total_tests, batch_size):
+                end_idx = min(start_idx + batch_size, total_tests)
+                tasks.append((start_idx, end_idx, length))
+
             with mp.get_context("fork").Pool(processes=procs) as pool:
                 with tqdm(total=total_tests, desc="测试进度", unit="题") as pbar:
                     for processed_i, success_i, attempts_i, max_attempts_i in pool.imap_unordered(
