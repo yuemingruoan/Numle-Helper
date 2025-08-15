@@ -85,10 +85,91 @@ def check(secret: str = typer.Argument(..., help="谜底数字")):
 @app.command()
 def solve(length: int = typer.Option(5, "--length", "-l", help="数字长度")):
     """
-    交互式求解模式。
+    求解模式：交互式求解模式。
     """
     solver = InteractiveNumleSolver(length)
     solver.solve_interactive()
+
+@app.command()
+def auto_solve(
+    secret: str = typer.Argument(None, help="目标数字 (可选，若不提供则随机生成)"),
+    length: int = typer.Option(5, "--length", "-l", help="数字长度 (当secret未提供时生效)"),
+):
+    """
+    自动求解模式：给定一个目标数，自动调用求解和检查模式，并且展示过程。
+    如果没有输入秘密数字，可以通过-l指定长度（默认5）自动生成一个。
+    """
+    try:
+        if secret is None:
+            # 若未提供 secret，则随机生成一个
+            print(f"未提供目标数字，将随机生成一个长度为 {length} 的数字。")
+            solver = InteractiveNumleSolver(length)
+            all_secrets = solver.all_combinations
+            secret_idx = np.random.randint(0, len(all_secrets))
+            secret_arr = all_secrets[secret_idx]
+            secret = (secret_arr + 48).tobytes().decode('ascii')
+            print(f"已生成谜底: {secret}")
+        else:
+            # 使用提供的 secret
+            length = len(secret)
+            if not secret.isdigit():
+                raise ValueError("目标数字必须只包含数字。")
+            solver = InteractiveNumleSolver(length)
+    except ValueError as e:
+        print(f"错误: {e}")
+        raise typer.Exit(code=1)
+
+    print(f"进入自动求解模式，目标为: {secret}")
+    
+    attempt = 1
+    start_time = time.time()
+    while True:
+        guess = solver.get_next_guess()
+        if guess is None:
+            print("错误：无法找到下一个猜测，可能存在矛盾或已无可能性。")
+            break
+        
+        print(f"\n第 {attempt} 次猜测: {guess}")
+        
+        result = InteractiveNumleSolver.check(secret, guess)
+@app.command()
+def play(length: int = typer.Argument(5, help="数字长度")):
+    """
+    游戏模式：程序随机生成一个数字，由用户来猜。
+    """
+    try:
+        solver = InteractiveNumleSolver(length)
+        all_secrets = solver.all_combinations
+        secret_idx = np.random.randint(0, len(all_secrets))
+        secret_arr = all_secrets[secret_idx]
+        secret = (secret_arr + 48).tobytes().decode('ascii')
+    except ValueError as e:
+        print(f"错误: {e}")
+        raise typer.Exit(code=1)
+
+    print(f"游戏开始！我已经想好了一个 {length} 位的数字。")
+    print("输入 'q' 放弃并查看答案。")
+    
+    attempt = 1
+    while True:
+        guess = typer.prompt(f"第 {attempt} 次猜测").strip()
+        if guess.lower() == 'q':
+            print(f"游戏结束。答案是: {secret}")
+            raise typer.Exit()
+        
+        try:
+            result = InteractiveNumleSolver.check(secret, guess)
+            total_correct = result['total_digits']
+            positions_correct = result['correct_positions']
+            print(f"结果: 包含数字: {total_correct}, 位置正确: {positions_correct}")
+
+            if positions_correct == length:
+                print(f"\n恭喜你！在第 {attempt} 次猜测后答对了！答案是: {secret}")
+                break
+        except ValueError as e:
+            print(f"错误: {e}")
+        
+        attempt += 1
 
 @app.command()
 def test(
@@ -97,18 +178,18 @@ def test(
     chunksize: int = typer.Option(0, "--chunksize", "-c", help="多进程时的任务分发批大小；<=0 表示自动估算"),
 ):
     """
-    自动遍历所有可能性进行测试。支持多进程，并使用 tqdm 显示进度条。
+    测试模式：自动遍历所有可能性进行测试。支持多进程，并使用 tqdm 显示进度条。
     """
     solver = InteractiveNumleSolver(length)
     print("\n开始自动遍历测试...")
     
-    start_time = time.time()
     all_secrets = solver.all_combinations
     total_tests = len(all_secrets)
     success_count = 0
     total_attempts = 0
     max_attempts = 0
     processed = 0
+    start_time = time.time()
 
     try:
         if processes is None or processes == 1:
