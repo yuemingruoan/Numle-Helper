@@ -39,6 +39,50 @@ def _solve_secret_worker(args):
     except KeyboardInterrupt:
         return False, 1
 
+# 新增：范围批处理工作进程，减少 IPC 与任务调度开销
+def _solve_range_worker(args):
+    """
+    工作进程函数：一次性处理一段谜底范围，返回聚合统计
+    返回: (processed, success_count, total_attempts, max_attempts)
+    """
+    try:
+        secrets_slice, length = args
+        global _G_SOLVER
+        solver = _G_SOLVER
+        if solver is None or getattr(solver, "digit_length", None) != length:
+            solver = InteractiveNumleSolver(length)
+            _G_SOLVER = solver
+
+        processed = 0
+        success_count = 0
+        total_attempts = 0
+        max_attempts = 0
+
+        for secret in secrets_slice:
+            # 重置解算器状态以复用 all_combinations
+            solver.possible_combinations = solver.all_combinations.copy()
+            attempt = 1
+            while True:
+                guess = solver.get_next_guess()
+                if guess is None:
+                    break
+                result = InteractiveNumleSolver.check(''.join(map(str, secret)), guess)
+                total_correct = result['total_digits']
+                positions_correct = result['correct_positions']
+                if positions_correct == solver.digit_length:
+                    success_count += 1
+                    total_attempts += attempt
+                    if attempt > max_attempts:
+                        max_attempts = attempt
+                    break
+                solver.update_possible_combinations(guess, total_correct, positions_correct)
+                attempt += 1
+            processed += 1
+
+        return processed, success_count, total_attempts, max_attempts
+    except KeyboardInterrupt:
+        return 0, 0, 0, 0
+
 app = typer.Typer()
 
 @app.command()
@@ -114,24 +158,25 @@ def test(
                     attempt += 1
                 processed += 1
         else:
-            # 多进程
+            # 多进程：将全部可能谜底按进程数等分，分别一次性下发到各进程处理
             procs = mp.cpu_count() if processes in (0, -1) else max(1, processes)
+            procs = min(procs, total_tests)  # 不要创建多于任务数量的进程
+            # 预先切片（一次性传完其被分配的范围）
+            size = (total_tests + procs - 1) // procs  # 向上取整
+            tasks = [ (all_secrets[i:i+size], length) for i in range(0, total_tests, size) ]
             with mp.get_context("fork").Pool(processes=procs) as pool:
                 with tqdm(total=total_tests, desc="测试进度", unit="题") as pbar:
-                    # 动态估算 chunksize（当传入 <=0 时），减少任务调度与 IPC 开销
-                    computed_chunksize = chunksize if chunksize and chunksize > 0 else max(1, min(10000, total_tests // (procs * 8) or 1))
-                    for success, attempts in pool.imap_unordered(
-                        _solve_secret_worker,
-                        ((secret, length) for secret in all_secrets),
-                        chunksize=computed_chunksize,
+                    for processed_i, success_i, attempts_i, max_attempts_i in pool.imap_unordered(
+                        _solve_range_worker,
+                        tasks,
+                        chunksize=1,
                     ):
-                        processed += 1
-                        pbar.update(1)
-                        if success:
-                            success_count += 1
-                            total_attempts += attempts
-                            if attempts > max_attempts:
-                                max_attempts = attempts
+                        processed += processed_i
+                        pbar.update(processed_i)
+                        success_count += success_i
+                        total_attempts += attempts_i
+                        if max_attempts_i > max_attempts:
+                            max_attempts = max_attempts_i
     except KeyboardInterrupt:
         end_time = time.time()
         total_time = end_time - start_time
