@@ -5,25 +5,39 @@ import sys
 import multiprocessing as mp
 from tqdm import tqdm
 
+# 进程内全局 Solver 缓存，用于复用生成的大规模组合，降低任务初始化开销
+_G_SOLVER = None
+
 def _solve_secret_worker(args):
     """
     工作进程函数：对单个谜底执行求解，返回 (success, attempts)
+    使用进程内全局缓存的 Solver，避免每个任务重复初始化与生成组合。
     """
-    secret, length = args
-    solver = InteractiveNumleSolver(length)
-    solver.possible_combinations = solver.all_combinations.copy()
-    attempt = 1
-    while True:
-        guess = solver.get_next_guess()
-        if guess is None:
-            return False, attempt - 1
-        result = InteractiveNumleSolver.check(''.join(map(str, secret)), guess)
-        total_correct = result['total_digits']
-        positions_correct = result['correct_positions']
-        if positions_correct == solver.digit_length:
-            return True, attempt
-        solver.update_possible_combinations(guess, total_correct, positions_correct)
-        attempt += 1
+    try:
+        secret, length = args
+        global _G_SOLVER
+        solver = _G_SOLVER
+        if solver is None or getattr(solver, "digit_length", None) != length:
+            # 首次进入该进程或长度变化时，仅初始化一次
+            solver = InteractiveNumleSolver(length)
+            _G_SOLVER = solver
+
+        # 每个任务仅重置候选空间，复用 all_combinations
+        solver.possible_combinations = solver.all_combinations.copy()
+        attempt = 1
+        while True:
+            guess = solver.get_next_guess()
+            if guess is None:
+                return False, attempt - 1
+            result = InteractiveNumleSolver.check(''.join(map(str, secret)), guess)
+            total_correct = result['total_digits']
+            positions_correct = result['correct_positions']
+            if positions_correct == solver.digit_length:
+                return True, attempt
+            solver.update_possible_combinations(guess, total_correct, positions_correct)
+            attempt += 1
+    except KeyboardInterrupt:
+        return False, 1
 
 app = typer.Typer()
 
@@ -58,7 +72,7 @@ def solve(length: int = typer.Option(5, "--length", "-l", help="数字长度")):
 def test(
     length: int = typer.Option(5, "--length", "-l", help="数字长度"),
     processes: int = typer.Option(1, "--processes", "-p", help="进程数；1为单进程，>1启用多进程；0或-1表示使用全部CPU内核"),
-    chunksize: int = typer.Option(50, "--chunksize", "-c", help="多进程时的任务分发批大小"),
+    chunksize: int = typer.Option(0, "--chunksize", "-c", help="多进程时的任务分发批大小；<=0 表示自动估算"),
 ):
     """
     自动遍历所有可能性进行测试。支持多进程，并使用 tqdm 显示进度条。
@@ -104,10 +118,12 @@ def test(
             procs = mp.cpu_count() if processes in (0, -1) else max(1, processes)
             with mp.get_context("fork").Pool(processes=procs) as pool:
                 with tqdm(total=total_tests, desc="测试进度", unit="题") as pbar:
+                    # 动态估算 chunksize（当传入 <=0 时），减少任务调度与 IPC 开销
+                    computed_chunksize = chunksize if chunksize and chunksize > 0 else max(1, min(10000, total_tests // (procs * 8) or 1))
                     for success, attempts in pool.imap_unordered(
                         _solve_secret_worker,
                         ((secret, length) for secret in all_secrets),
-                        chunksize=chunksize,
+                        chunksize=computed_chunksize,
                     ):
                         processed += 1
                         pbar.update(1)
