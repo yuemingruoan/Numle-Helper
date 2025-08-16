@@ -3,11 +3,10 @@ from interactive_numle_solver import (
     InteractiveNumleSolver, _check_nb, _calculate_entropies_nb, _filter_combinations_nb
 )
 import time
-import sys
-import multiprocessing as mp
-from tqdm import tqdm
+import threading
 import numpy as np
 import numba
+from tqdm import tqdm
 
 # ======================================================================================
 # Numba JIT 优化的核心求解器
@@ -46,12 +45,22 @@ def _solve_one_secret_nb(all_combinations, secret_arr):
         
         attempt += 1
 
+@numba.njit(parallel=True, cache=True)
+def _test_all_nb(all_combinations, results):
+    """
+    Numba JIT (并行模式): 测试所有组合
+    直接在传入的 results 数组上修改，方便外部跟踪进度
+    """
+    n_tests = len(all_combinations)
+    for i in numba.prange(n_tests):
+        secret = all_combinations[i]
+        is_success, attempts = _solve_one_secret_nb(all_combinations, secret)
+        results[i, 0] = is_success
+        results[i, 1] = attempts
+
 # ======================================================================================
 # Python 侧的包装与工作流
 # ======================================================================================
-
-# 进程内全局 Solver 缓存
-_G_SOLVER = None
 
 def _solve_one_secret(solver: InteractiveNumleSolver, secret_arr: np.ndarray):
     """
@@ -59,38 +68,6 @@ def _solve_one_secret(solver: InteractiveNumleSolver, secret_arr: np.ndarray):
     """
     # 直接调用 JIT 函数
     return _solve_one_secret_nb(solver.all_combinations, secret_arr)
-
-def _solve_range_worker(args):
-    """
-    工作进程函数：处理 [start, end) 范围内的谜底索引
-    """
-    try:
-        start, end, length = args
-        global _G_SOLVER
-        if _G_SOLVER is None or getattr(_G_SOLVER, "digit_length", None) != length:
-            _G_SOLVER = InteractiveNumleSolver(length)
-
-        all_secrets = _G_SOLVER.all_combinations
-        
-        processed = 0
-        success_count = 0
-        total_attempts = 0
-        max_attempts = 0
-
-        for idx in range(start, end):
-            secret_arr = all_secrets[idx]
-            # 直接调用 JIT 函数
-            is_success, attempts = _solve_one_secret_nb(all_secrets, secret_arr)
-            if is_success:
-                success_count += 1
-                total_attempts += attempts
-                if attempts > max_attempts:
-                    max_attempts = attempts
-            processed += 1
-
-        return processed, success_count, total_attempts, max_attempts
-    except KeyboardInterrupt:
-        return 0, 0, 0, 0
 
 app = typer.Typer()
 
@@ -218,100 +195,87 @@ def play(length: int = typer.Argument(5, help="数字长度")):
 @app.command()
 def test(
     length: int = typer.Option(5, "--length", "-l", help="数字长度"),
-    processes: int = typer.Option(1, "--processes", "-p", help="进程数；1为单进程，>1启用多进程；0或-1表示使用全部CPU内核"),
-    chunksize: int = typer.Option(0, "--chunksize", "-c", help="多进程时的任务分发批大小；<=0 表示自动估算"),
+    parallel: bool = typer.Option(False, "--parallel/--no-parallel", "-p", help="是否启用 Numba 并行计算"),
 ):
     """
-    测试模式：自动遍历所有可能性进行测试。支持多进程，并使用 tqdm 显示进度条。
+    测试模式：使用 Numba 并行计算自动遍历所有可能性。
     """
     solver = InteractiveNumleSolver(length)
-    print("\n开始自动遍历测试...")
-    
     all_secrets = solver.all_combinations
     total_tests = len(all_secrets)
-    success_count = 0
-    total_attempts = 0
-    max_attempts = 0
-    processed = 0
+
+    print("\n开始自动遍历测试...")
+    print(f"数字长度: {length}, 总测试数: {total_tests}, 并行计算: {'启用' if parallel else '禁用'}")
+
+    # Numba JIT 预热
+    print("Numba JIT 预热中...")
     start_time = time.time()
+    # 预热时传入一个空的 results 数组
+    dummy_results = np.empty((1, 2), dtype=np.int32)
+    if parallel:
+        _test_all_nb(all_secrets[:1], dummy_results)
+    else:
+        _solve_one_secret_nb(all_secrets, all_secrets[0])
+    end_time = time.time()
+    print(f"预热完成，耗时: {end_time - start_time:.2f} 秒。")
 
-    try:
-        if processes is None or processes == 1:
-            # 单进程
-            # 单进程模式也直接调用 JIT 函数
-            for secret in tqdm(all_secrets, desc="测试进度", unit="题"):
-                is_success, attempts = _solve_one_secret_nb(all_secrets, secret)
-                if is_success:
-                    success_count += 1
-                    total_attempts += attempts
-                    if attempts > max_attempts:
-                        max_attempts = attempts
-                processed += 1
-        else:
-            # 多进程
-            procs = mp.cpu_count() if processes in (0, -1) else max(1, processes)
-            procs = min(procs, total_tests)
+    # 执行主计算
+    start_time = time.time()
+    
+    if parallel:
+        # Numba 并行模式 + 原生进度条
+        print("正在执行并行计算...")
+        # 初始化 results 数组，使用 -1 作为未完成任务的标记
+        results = np.full((total_tests, 2), -1, dtype=np.int32)
+        
+        # 在工作线程中运行 Numba 计算
+        worker = threading.Thread(target=_test_all_nb, args=(all_secrets, results))
+        worker.start()
+        
+        # 主线程负责更新进度
+        while worker.is_alive():
+            # 通过检查标记值来计算已完成的任务数
+            processed = np.sum(results[:, 1] != -1)
+            print(f"\r进度: {processed}/{total_tests}", end="")
+            time.sleep(0.2)
+        
+        worker.join()
+        # 确保最终进度显示为 100%
+        print(f"\r进度: {total_tests}/{total_tests}")
 
-            # Numba JIT 预热：在主进程中编译一次，子进程通过 fork 继承已编译的代码
-            print("Numba JIT 预热中...")
-            dummy_secret = all_secrets[0]
-            _solve_one_secret_nb(all_secrets, dummy_secret)
-            print("预热完成。")
+    else:
+        # 单线程 tqdm 模式
+        results = np.empty((total_tests, 2), dtype=np.int32)
+        for i in tqdm(range(total_tests), desc="测试进度", unit="题"):
+            is_success, attempts = _solve_one_secret_nb(all_secrets, all_secrets[i])
+            results[i, 0] = is_success
+            results[i, 1] = attempts
 
-            global _G_SOLVER
-            _G_SOLVER = solver
-
-            if chunksize and chunksize > 0:
-                batch_size = int(chunksize)
-            else:
-                target_tasks = max(procs * 4, 1)
-                batch_size = max(1, (total_tests + target_tasks - 1) // target_tasks)
-
-            tasks = []
-            for start_idx in range(0, total_tests, batch_size):
-                end_idx = min(start_idx + batch_size, total_tests)
-                tasks.append((start_idx, end_idx, length))
-
-            with mp.get_context("fork").Pool(processes=procs) as pool:
-                with tqdm(total=total_tests, desc="测试进度", unit="题") as pbar:
-                    for processed_i, success_i, attempts_i, max_attempts_i in pool.imap_unordered(
-                        _solve_range_worker, tasks, chunksize=1
-                    ):
-                        processed += processed_i
-                        pbar.update(processed_i)
-                        success_count += success_i
-                        total_attempts += attempts_i
-                        if max_attempts_i > max_attempts:
-                            max_attempts = max_attempts_i
-    except KeyboardInterrupt:
-        end_time = time.time()
-        total_time = end_time - start_time
-        print("\n\n测试被中断，显示当前统计结果:")
-        print(f"已完成测试数: {processed}/{total_tests}")
-        print(f"成功次数: {success_count}")
-        if processed > 0:
-            print(f"当前成功率: {success_count/processed*100:.2f}%")
-        if success_count > 0:
-            print(f"平均猜测次数: {total_attempts/success_count:.2f}")
-            print(f"最高猜测次数: {max_attempts}")
-        print(f"当前总耗时: {total_time:.2f}秒")
-        if processed > 0:
-            print(f"平均每个测试耗时: {total_time/processed:.4f}秒")
-        sys.exit(0)
-            
     end_time = time.time()
     total_time = end_time - start_time
+    print("计算完成。")
+
+    # 结果统计 (使用 Numpy 高效完成)
+    success_mask = results[:, 0] == 1
+    success_count = np.sum(success_mask)
+    
     print(f"\n测试完成！结果:")
     print(f"测试总数: {total_tests}")
     print(f"成功次数: {success_count}")
+    
     if total_tests > 0:
-        print(f"成功率: {success_count/total_tests*100:.2f}%")
+        print(f"成功率: {success_count / total_tests * 100:.2f}%")
+        
     if success_count > 0:
-        print(f"平均猜测次数: {total_attempts/success_count:.2f}")
+        successful_attempts = results[success_mask, 1]
+        total_attempts = np.sum(successful_attempts)
+        max_attempts = np.max(successful_attempts)
+        print(f"平均猜测次数: {total_attempts / success_count:.2f}")
         print(f"最高猜测次数: {max_attempts}")
+        
     print(f"总耗时: {total_time:.2f}秒")
     if total_tests > 0:
-        print(f"平均每个测试耗时: {total_time/total_tests:.4f}秒")
+        print(f"平均每个测试耗时: {total_time / total_tests:.4f}秒")
 
 if __name__ == "__main__":
     app()
