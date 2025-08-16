@@ -17,7 +17,12 @@
 ### 查看帮助
 
 ```sh
-uv run main.py --help
+uv venv
+```
+进入虚拟环境后：
+```sh
+uv pip install -r pyproject.toml
+python main.py --help
 ```
 
 ### 命令示例
@@ -27,7 +32,7 @@ uv run main.py --help
 开始一个5位数字的猜谜游戏：
 
 ```sh
-uv run main.py play 5
+python main.py play 5
 ```
 
 #### 检查模式 (`check`)
@@ -35,7 +40,7 @@ uv run main.py play 5
 以 `12345` 为谜底，检查用户的猜测：
 
 ```sh
-uv run main.py check 12345
+python main.py check 12345
 ```
 
 #### 求解模式 (`solve`)
@@ -43,7 +48,7 @@ uv run main.py check 12345
 启动一个5位数字的交互式求解器：
 
 ```sh
-uv run main.py solve --length 5
+python main.py solve --length 5
 ```
 
 #### 自动求解模式 (`auto-solve`)
@@ -51,13 +56,13 @@ uv run main.py solve --length 5
 自动求解谜底 `98765`：
 
 ```sh
-uv run main.py auto-solve 98765
+python main.py auto-solve 98765
 ```
 
 随机生成一个5位数的谜底并自动求解：
 
 ```sh
-uv run main.py auto-solve --length 5
+python main.py auto-solve --length 5
 ```
 
 #### 测试模式 (`test`)
@@ -65,5 +70,5 @@ uv run main.py auto-solve --length 5
 使用所有 CPU 核心测试4位数字的所有可能性：
 
 ```sh
-uv run main.py test -l 4 -p 0
+python main.py test -l 4 -p 0
 ```

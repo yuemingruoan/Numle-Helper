@@ -2,7 +2,6 @@ import typer
 from torch_numle_solver import TorchNumleSolver
 import time
 import torch
-import numpy as np
 from tqdm import tqdm
 
 # ======================================================================================
@@ -18,28 +17,29 @@ def _solve_one_secret_torch(solver: TorchNumleSolver, secret_arr: torch.Tensor):
     possible_combinations = solver.all_combinations.clone()
     
     attempt = 1
-    while True:
-        # 1. 获取猜测
-        if len(possible_combinations) == 0:
-            return False, attempt # 解算失败
+    with torch.no_grad():
+        while True:
+            # 1. 获取猜测
+            if len(possible_combinations) == 0:
+                return False, attempt # 解算失败
 
-        entropies = TorchNumleSolver._calculate_entropies_torch(possible_combinations)
-        best_idx = torch.argmax(entropies)
-        guess_arr = possible_combinations[best_idx]
+            entropies = TorchNumleSolver._calculate_entropies_torch(possible_combinations)
+            best_idx = torch.argmax(entropies)
+            guess_arr = possible_combinations[best_idx]
 
-        # 2. 检查
-        total_correct, positions_correct = TorchNumleSolver._check_torch(secret_arr, guess_arr)
-        
-        if positions_correct == solver.digit_length:
-            return True, attempt # 成功
+            # 2. 检查
+            total_correct, positions_correct = TorchNumleSolver._check_torch(secret_arr, guess_arr)
             
-        # 3. 更新可能性
-        mask = TorchNumleSolver._filter_combinations_torch(
-            possible_combinations, guess_arr, total_correct.item(), positions_correct.item()
-        )
-        possible_combinations = possible_combinations[mask]
-        
-        attempt += 1
+            if positions_correct == solver.digit_length:
+                return True, attempt # 成功
+                
+            # 3. 更新可能性
+            mask = TorchNumleSolver._filter_combinations_torch(
+                possible_combinations, guess_arr, total_correct.item(), positions_correct.item()
+            )
+            possible_combinations = possible_combinations[mask]
+            
+            attempt += 1
 
 # ======================================================================================
 # Python 侧的包装与工作流
@@ -109,7 +109,7 @@ def auto_solve(
             all_secrets = solver.all_combinations
             secret_idx = torch.randint(0, len(all_secrets), (1,)).item()
             secret_arr = all_secrets[secret_idx]
-            secret = ''.join(map(str, secret_arr.cpu().numpy()))
+            secret = "".join([str(i.item()) for i in secret_arr])
             print(f"已生成谜底: {secret}")
         else:
             length = len(secret)
@@ -195,9 +195,9 @@ def test(
     print("计算完成。")
 
     # 结果统计
-    results_np = results.numpy()
-    success_mask = results_np[:, 0] == 1
-    success_count = np.sum(success_mask)
+    # 结果统计 (使用 PyTorch)
+    success_mask = results[:, 0] == 1
+    success_count = torch.sum(success_mask).item()
     
     print(f"\n测试完成！结果:")
     print(f"测试总数: {total_tests}")
@@ -207,9 +207,9 @@ def test(
         print(f"成功率: {success_count / total_tests * 100:.2f}%")
         
     if success_count > 0:
-        successful_attempts = results_np[success_mask, 1]
-        total_attempts = np.sum(successful_attempts)
-        max_attempts = np.max(successful_attempts)
+        successful_attempts = results[success_mask, 1]
+        total_attempts = torch.sum(successful_attempts).item()
+        max_attempts = torch.max(successful_attempts).item()
         print(f"平均猜测次数: {total_attempts / success_count:.2f}")
         print(f"最高猜测次数: {max_attempts}")
         

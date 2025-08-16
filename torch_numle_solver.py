@@ -1,7 +1,6 @@
 import torch
 import torch.nn.functional as F
 import itertools
-import numpy as np
 
 # ======================================================================================
 # 主类
@@ -9,84 +8,149 @@ import numpy as np
 
 class TorchNumleSolver:
     @staticmethod
-    def _check_torch(s, g):
-        """PyTorch: 检查 secret 和 guess"""
-        # 确保输入是 tensor
-        if not isinstance(s, torch.Tensor):
-            s = torch.from_numpy(s)
-        if not isinstance(g, torch.Tensor):
-            g = torch.from_numpy(g)
-        
-        device = s.device
-        
+    @torch.jit.script
+    def _check_torch(s: torch.Tensor, g: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """PyTorch JIT: 检查 secret 和 guess"""
         # 1. 检查位置正确数
         correct_positions = (s == g).sum()
 
-        # 2. 检查数字正确数
-        s_counts = torch.bincount(s, minlength=10)
-        g_counts = torch.bincount(g, minlength=10)
+        # 2. 检查数字正确数 (使用 one-hot, 对 JIT/GPU 更友好)
+        s_one_hot = F.one_hot(s, num_classes=10)
+        g_one_hot = F.one_hot(g, num_classes=10)
+        s_counts = s_one_hot.sum(dim=0)
+        g_counts = g_one_hot.sum(dim=0)
         correct_digits = torch.min(s_counts, g_counts).sum()
         
         return correct_digits, correct_positions
 
     @staticmethod
-    def _calculate_entropies_torch(candidates):
-        """PyTorch: 计算所有候选组合的信息熵"""
+    @torch.jit.script
+    def _calculate_entropies_torch(candidates: torch.Tensor) -> torch.Tensor:
+        """PyTorch JIT: 计算所有候选组合的信息熵"""
         N, L = candidates.shape
         device = candidates.device
 
         # 1. 统计每一列(位置)的数字分布
-        # 使用 one-hot 编码来计数
-        one_hot_candidates = F.one_hot(candidates, num_classes=10).float() # (N, L, 10)
-        counts = one_hot_candidates.sum(dim=0) # (L, 10)
+        one_hot_candidates = F.one_hot(candidates, num_classes=10).to(torch.float32)
+        counts = one_hot_candidates.sum(dim=0)
 
         # 2. 计算概率与信息贡献
-        freq = counts / N
-        # 使用 where 避免 log(0)
-        log_freq = torch.where(freq > 0, torch.log2(freq), torch.tensor(0.0, device=device))
-        contrib = -freq * log_freq # (L, 10)
+        freq = counts / float(N)
+        non_zero_freq = freq > 0
+        log_freq = torch.zeros_like(freq)
+        log_freq[non_zero_freq] = torch.log2(freq[non_zero_freq])
+        contrib = -freq * log_freq  # Shape: (L, 10)
 
-        # 3. 对所有候选计算熵
-        # 使用 gather 从贡献表中提取每个候选组合对应位置和数字的熵贡献
-        # contrib.unsqueeze(0) -> (1, L, 10)
-        # candidates.unsqueeze(-1) -> (N, L, 1)
-        # gather 结果 -> (N, L, 1), squeeze(-1) -> (N, L)
-        entropies = contrib.gather(1, candidates.T).sum(dim=0)
+        # 3. 对所有候选计算熵 (向量化版本)
+        # 扩展 contrib 以匹配 candidates 的批次大小
+        # contrib shape: (L, 10) -> (1, L, 10) -> (N, L, 10)
+        contrib_expanded = contrib.unsqueeze(0).expand(N, -1, -1)
+        
+        # 扩展 candidates 以用作 gather 的索引
+        # candidates shape: (N, L) -> (N, L, 1)
+        candidates_expanded = candidates.unsqueeze(-1)
+
+        # 使用 gather 收集每个候选组合的熵贡献
+        # gathered_entropies shape: (N, L, 1)
+        gathered_entropies = torch.gather(contrib_expanded, 2, candidates_expanded)
+
+        # 求和得到最终熵
+        # entropies shape: (N,)
+        entropies = gathered_entropies.squeeze(-1).sum(dim=1)
         
         return entropies
 
     @staticmethod
-    def _filter_combinations_torch(combinations, guess_arr, total_correct, positions_correct):
-        """PyTorch: 过滤不满足条件的组合"""
-        N, L = combinations.shape
-        device = combinations.device
-
+    @torch.jit.script
+    def _filter_combinations_torch(combinations: torch.Tensor, guess_arr: torch.Tensor, total_correct: int, positions_correct: int) -> torch.Tensor:
+        """PyTorch JIT: 过滤不满足条件的组合"""
         # 1. 检查位置正确数
-        # (N, L) vs (L,) -> 广播 -> (N, L)
         pos_correct_counts = (combinations == guess_arr).sum(dim=1)
-        mask = (pos_correct_counts == positions_correct)
+        pos_mask = (pos_correct_counts == positions_correct)
         
         # 如果掩码已经全为 False，提前返回
-        if not torch.any(mask):
-            return mask
+        if not torch.any(pos_mask):
+            return pos_mask
 
         # 2. 检查数字正确数
-        # 只对掩码为 True 的组合进行计算
-        active_combinations = combinations[mask]
+        active_combinations = combinations[pos_mask]
         
-        # 使用 bincount 批量计算
-        # 先将 active_combinations 转换为 one-hot
-        active_one_hot = F.one_hot(active_combinations, num_classes=10) # (n_active, L, 10)
-        comb_counts = active_one_hot.sum(dim=1) # (n_active, 10)
+        if active_combinations.numel() == 0:
+            return pos_mask
+
+        # 使用 one-hot 批量计算 (比 bincount 更适合 JIT)
+        active_one_hot = F.one_hot(active_combinations, num_classes=10)
+        comb_counts = active_one_hot.sum(dim=1)
         
-        guess_counts = torch.bincount(guess_arr, minlength=10) # (10,)
+        guess_one_hot = F.one_hot(guess_arr, num_classes=10)
+        guess_counts = guess_one_hot.sum(dim=0)
 
         total_correct_counts = torch.min(comb_counts, guess_counts).sum(dim=1)
         
-        # 更新掩码
-        mask[mask] = (total_correct_counts == total_correct)
+        # 计算第二阶段的掩码
+        total_mask = (total_correct_counts == total_correct)
         
-        return mask
+        # 将第二阶段的结果更新回原始掩码
+        final_mask = pos_mask.clone()
+        final_mask[pos_mask] = total_mask
+        
+        return final_mask
+
+    @staticmethod
+    @torch.jit.script
+    def _check_torch_batched(s: torch.Tensor, g: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """PyTorch JIT: 批量检查 secrets 和 guesses
+        s: (B, L)
+        g: (B, L)
+        """
+        B, L = s.shape
+        
+        # 1. 批量检查位置正确数
+        correct_positions = (s == g).sum(dim=1)
+
+        # 2. 批量检查数字正确数
+        s_one_hot = F.one_hot(s, num_classes=10)  # (B, L, 10)
+        g_one_hot = F.one_hot(g, num_classes=10)  # (B, L, 10)
+        s_counts = s_one_hot.sum(dim=1)  # (B, 10)
+        g_counts = g_one_hot.sum(dim=1)  # (B, 10)
+        correct_digits = torch.min(s_counts, g_counts).sum(dim=1)
+        
+        return correct_digits, correct_positions
+
+    @staticmethod
+    @torch.jit.script
+    def _filter_combinations_torch_batched(
+        combinations: torch.Tensor, guess_arr: torch.Tensor,
+        total_correct: torch.Tensor, positions_correct: torch.Tensor
+    ) -> torch.Tensor:
+        """PyTorch JIT: 批量过滤不满足条件的组合
+        combinations: (B, N, L)
+        guess_arr: (B, L)
+        total_correct: (B,)
+        positions_correct: (B,)
+        """
+        B, N, L = combinations.shape
+        
+        # 1. 批量检查位置正确数
+        # guess_arr (B, L) -> (B, 1, L)
+        # combinations (B, N, L) vs guess_arr (B, 1, L) -> (B, N, L)
+        pos_correct_counts = (combinations == guess_arr.unsqueeze(1)).sum(dim=2) # (B, N)
+        pos_mask = (pos_correct_counts == positions_correct.unsqueeze(1)) # (B, N)
+
+        # 2. 批量检查数字正确数
+        # one-hot 转换
+        comb_one_hot = F.one_hot(combinations, num_classes=10) # (B, N, L, 10)
+        comb_counts = comb_one_hot.sum(dim=2) # (B, N, 10)
+
+        guess_one_hot = F.one_hot(guess_arr, num_classes=10) # (B, L, 10)
+        guess_counts = guess_one_hot.sum(dim=1) # (B, 10)
+
+        # guess_counts (B, 10) -> (B, 1, 10)
+        total_correct_counts = torch.min(comb_counts, guess_counts.unsqueeze(1)).sum(dim=2) # (B, N)
+        total_mask = (total_correct_counts == total_correct.unsqueeze(1)) # (B, N)
+        
+        # 合并两个掩码
+        return pos_mask & total_mask
 
     def __init__(self, digit_length=5, device='cpu'):
         self.digit_length = digit_length
@@ -118,7 +182,7 @@ class TorchNumleSolver:
 
         best_idx = torch.argmax(entropies)
         best_guess_tensor = candidates[best_idx]
-        return ''.join(map(str, best_guess_tensor.cpu().numpy()))
+        return "".join([str(i.item()) for i in best_guess_tensor])
         
     @staticmethod
     def check(secret, guess, device='cpu'):
@@ -201,10 +265,10 @@ class TorchNumleSolver:
         
         print(f"\n超过最大尝试次数 ({max_attempts})。")
         if len(self.possible_combinations) == 1:
-            final_answer = ''.join(map(str, self.possible_combinations[0].cpu().numpy()))
+            final_answer = "".join([str(i.item()) for i in self.possible_combinations[0]])
             print(f"唯一剩下的答案是: {final_answer}")
         elif 0 < len(self.possible_combinations) <= 10:
             print("剩余的可能性:")
             for comb in self.possible_combinations:
-                print(''.join(map(str, comb.cpu().numpy())))
+                print("".join([str(i.item()) for i in comb]))
         return False
