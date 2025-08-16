@@ -1,5 +1,6 @@
 import numpy as np
 import numba
+import itertools
 
 # ======================================================================================
 # Numba JIT 优化的核心计算函数
@@ -110,10 +111,14 @@ class InteractiveNumleSolver:
         self.all_combinations = self.generate_all_combinations()
         
     def generate_all_combinations(self):
-        """生成所有可能的数字组合"""
+        """生成所有不含重复数字的可能组合"""
+        if self.digit_length > 10:
+            raise ValueError("数字长度不能超过10，因为数字不能重复")
+        
+        # 使用itertools.permutations生成所有不重复的组合
         digits = np.arange(10, dtype=np.uint8)
-        grids = np.meshgrid(*([digits]*self.digit_length))
-        return np.stack(grids, axis=-1).reshape(-1, self.digit_length)
+        all_perms = list(itertools.permutations(digits, self.digit_length))
+        return np.array(all_perms, dtype=np.uint8)
     
     def get_next_guess(self):
         """获取下一个猜测（调用 Numba JIT 核心）"""

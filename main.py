@@ -84,6 +84,9 @@ def check(secret: str = typer.Argument(..., help="谜底数字")):
             print("退出检查模式")
             raise typer.Exit()
         
+        if len(set(guess)) != len(guess):
+            print("错误：猜测的数字不能包含重复值。")
+            continue
         try:
             result = InteractiveNumleSolver.check(secret, guess)
             print(f"结果: 包含数字: {result['total_digits']}, 位置正确: {result['correct_positions']}")
@@ -120,8 +123,8 @@ def auto_solve(
         else:
             # 使用提供的 secret
             length = len(secret)
-            if not secret.isdigit():
-                raise ValueError("目标数字必须只包含数字。")
+            if not secret.isdigit() or len(set(secret)) != length:
+                raise ValueError("目标数字必须只包含数字，且不能有重复。")
             solver = InteractiveNumleSolver(length)
     except ValueError as e:
         print(f"错误: {e}")
@@ -179,6 +182,10 @@ def play(length: int = typer.Argument(5, help="数字长度")):
             raise typer.Exit()
         
         try:
+            if len(set(guess)) != len(guess):
+                print("错误：猜测的数字不能包含重复值。")
+                continue
+
             result = InteractiveNumleSolver.check(secret, guess)
             total_correct = result['total_digits']
             positions_correct = result['correct_positions']
