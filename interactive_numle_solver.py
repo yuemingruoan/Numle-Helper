@@ -6,7 +6,7 @@ import itertools
 # Numba JIT 优化的核心计算函数
 # ======================================================================================
 
-@numba.njit(cache=True)
+@numba.njit(cache=True, fastmath=True)
 def _check_nb(s, g):
     """Numba JIT: 检查 secret 和 guess"""
     correct_positions = 0
@@ -28,7 +28,7 @@ def _check_nb(s, g):
         
     return correct_digits, correct_positions
 
-@numba.njit(cache=True)
+@numba.njit(cache=True, fastmath=True)
 def _calculate_entropies_nb(candidates, L):
     """Numba JIT: 计算所有候选组合的信息熵"""
     N = len(candidates)
@@ -57,7 +57,7 @@ def _calculate_entropies_nb(candidates, L):
         
     return entropies
 
-@numba.njit(cache=True)
+@numba.njit(cache=True, fastmath=True)
 def _filter_combinations_nb(combinations, guess_arr, total_correct, positions_correct):
     """Numba JIT: 过滤不满足条件的组合"""
     n_combinations, L = combinations.shape
@@ -101,7 +101,7 @@ def _filter_combinations_nb(combinations, guess_arr, total_correct, positions_co
     return mask
 
 
-@numba.njit(cache=True)
+@numba.njit(cache=True, fastmath=True)
 def _calculate_entropies_nb_masked(candidates, mask, L):
     """Numba JIT: 根据掩码计算候选组合的信息熵"""
     N = np.sum(mask)
@@ -133,7 +133,58 @@ def _calculate_entropies_nb_masked(candidates, mask, L):
             
     return entropies
 
-@numba.njit(cache=True)
+@numba.njit(cache=True, fastmath=True)
+def _get_best_guess_from_mask_nb(candidates, mask, L):
+    """
+    Numba JIT: 高效地从掩码中计算熵并找到最佳猜测。
+    - 合并了熵计算和最大熵搜索，以减少对所有组合的循环次数。
+    - 仅对掩码指定的候选进行操作。
+    - 返回熵最高的候选的索引。
+    """
+    N = np.sum(mask)
+    if N == 0:
+        return -1 # 没有找到
+    
+    # 如果只剩一个可能性，直接返回那个可能性的索引，无需计算熵
+    if N == 1:
+        for i in range(candidates.shape[0]):
+            if mask[i]:
+                return i
+        return -1 # 理论上不会发生
+
+    # 1. 统计数字分布
+    counts = np.zeros((L, 10), dtype=np.int32)
+    for i in range(candidates.shape[0]):
+        if mask[i]:
+            comb = candidates[i]
+            for j in range(L):
+                counts[j, comb[j]] += 1
+
+    # 2. 计算频率和信息贡献
+    freq = counts / float(N)
+    contrib = np.zeros_like(freq, dtype=np.float32)
+    for i in range(L):
+        for j in range(10):
+            if freq[i, j] > 0:
+                contrib[i, j] = -freq[i, j] * np.log2(freq[i, j])
+
+    # 3. 在一次遍历中计算熵并找到最佳猜测
+    # 我们的猜测本身也必须是众多可能性之一
+    best_idx = -1
+    max_entropy = -1.0
+    for i in range(candidates.shape[0]):
+        if mask[i]:
+            e = 0.0
+            comb = candidates[i]
+            for j in range(L):
+                e += contrib[j, comb[j]]
+            
+            if e > max_entropy:
+                max_entropy = e
+                best_idx = i
+                
+    return best_idx
+@numba.njit(cache=True, fastmath=True)
 def _filter_combinations_nb_inplace(mask, combinations, guess_arr, total_correct, positions_correct):
     """Numba JIT: 原地过滤不满足条件的组合 (修改 mask)"""
     n_combinations, L = combinations.shape

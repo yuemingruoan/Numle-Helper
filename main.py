@@ -5,7 +5,7 @@
 import typer
 from interactive_numle_solver import (
     InteractiveNumleSolver, _check_nb, _calculate_entropies_nb,
-    _calculate_entropies_nb_masked, _filter_combinations_nb_inplace
+    _filter_combinations_nb_inplace, _get_best_guess_from_mask_nb
 )
 import time
 import threading
@@ -17,7 +17,7 @@ from tqdm import tqdm
 # Numba JIT 优化的核心求解器
 # ======================================================================================
 
-@numba.njit(cache=True)
+@numba.njit(cache=True, fastmath=True)
 def _solve_one_secret_nb(all_combinations, secret_arr, first_guess_arr=None):
     """
     Numba JIT: 静默模式解算单个谜底，返回是否成功及尝试次数
@@ -36,30 +36,17 @@ def _solve_one_secret_nb(all_combinations, secret_arr, first_guess_arr=None):
     attempt = 1
     while True:
         # 1. 获取猜测
-        possible_count = np.sum(mask)
-        if possible_count == 0:
-            return False, attempt # 解算失败
+        if np.sum(mask) == 0:
+            return False, attempt  # 解算失败
 
         # 如果是第一次尝试且提供了预计算的猜测，直接使用
         if attempt == 1 and first_guess_arr is not None:
             guess_arr = first_guess_arr
-        # 如果只剩一个可能性，直接猜它，无需计算熵
-        elif possible_count == 1:
-            # 找到那个唯一的 True
-            for i in range(n_combinations):
-                if mask[i]:
-                    guess_arr = all_combinations[i]
-                    break
         else:
-            # 计算熵并找到最佳猜测
-            entropies = _calculate_entropies_nb_masked(all_combinations, mask, L)
-            # 在所有可能性中找到熵最高的
-            best_idx = -1
-            max_entropy = -1.0
-            for i in range(n_combinations):
-                if mask[i] and entropies[i] > max_entropy:
-                    max_entropy = entropies[i]
-                    best_idx = i
+            # 高效地获取最佳猜测
+            best_idx = _get_best_guess_from_mask_nb(all_combinations, mask, L)
+            if best_idx == -1:
+                return False, attempt # 无法找到猜测
             guess_arr = all_combinations[best_idx]
 
         # 2. 检查
@@ -75,7 +62,7 @@ def _solve_one_secret_nb(all_combinations, secret_arr, first_guess_arr=None):
         
         attempt += 1
 
-@numba.njit(parallel=True, cache=True)
+@numba.njit(parallel=True, cache=True, fastmath=True)
 def _test_all_nb(all_combinations, results, first_guess_arr):
     """
     Numba JIT (并行模式): 测试所有组合
@@ -88,16 +75,22 @@ def _test_all_nb(all_combinations, results, first_guess_arr):
         results[i, 0] = is_success
         results[i, 1] = attempts
 
+@numba.njit(cache=True, fastmath=True)
+def _test_all_nb_single_thread(all_combinations, results, first_guess_arr):
+    """
+    Numba JIT (单线程): 测试所有组合，以消除 Python 循环开销
+    """
+    n_tests = len(all_combinations)
+    for i in range(n_tests):
+        secret = all_combinations[i]
+        is_success, attempts = _solve_one_secret_nb(all_combinations, secret, first_guess_arr)
+        results[i, 0] = is_success
+        results[i, 1] = attempts
+
 # ======================================================================================
 # Python 侧的包装与工作流
 # ======================================================================================
 
-def _solve_one_secret(solver: InteractiveNumleSolver, secret_arr: np.ndarray):
-    """
-    静默求解的 Python 包装器，调用 Numba JIT 核心
-    """
-    # 直接调用 JIT 函数
-    return _solve_one_secret_nb(solver.all_combinations, secret_arr)
 
 app = typer.Typer()
 
@@ -256,7 +249,8 @@ def test(
     # 预热 JIT 函数
     dummy_results = np.empty((1, 2), dtype=np.int32)
     _test_all_nb(all_secrets[:1], dummy_results, first_guess_arr) # 并行预热
-    _solve_one_secret_nb(all_secrets, all_secrets[0], first_guess_arr) # 单线程预热
+    _solve_one_secret_nb(all_secrets, all_secrets[0], first_guess_arr) # 单核求解器预热
+    _test_all_nb_single_thread(all_secrets[:1], dummy_results, first_guess_arr) # 单线程测试循环预热
 
     end_time = time.time()
     print(f"预热完成，耗时: {end_time - start_time:.2f} 秒。")
@@ -289,11 +283,25 @@ def test(
         worker.join()
         
     else:
-        # 单线程 tqdm 模式
-        for i in tqdm(range(total_tests), desc="测试进度", unit="题"):
-            is_success, attempts = _solve_one_secret_nb(all_secrets, all_secrets[i], first_guess_arr)
-            results[i, 0] = is_success
-            results[i, 1] = attempts
+        # 单线程 Numba 模式 + TQDM
+        print("正在执行单线程计算 (Numba 核心)...")
+        results.fill(-1)
+
+        # 在工作线程中运行 Numba 计算
+        worker = threading.Thread(target=_test_all_nb_single_thread, args=(all_secrets, results, first_guess_arr))
+        worker.start()
+
+        # 主线程使用 tqdm 更新进度
+        with tqdm(total=total_tests, desc="单线程测试进度") as pbar:
+            while worker.is_alive():
+                processed = np.sum(results[:, 1] != -1)
+                pbar.update(processed - pbar.n)
+                time.sleep(0.1)
+            # 确保进度条在最后能达到100%
+            processed = np.sum(results[:, 1] != -1)
+            pbar.update(processed - pbar.n)
+        
+        worker.join()
 
     end_time = time.time()
     total_time = end_time - start_time
