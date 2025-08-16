@@ -9,6 +9,37 @@ import numpy as np
 # 进程内全局 Solver 缓存，用于复用生成的大规模组合，降低任务初始化开销
 _G_SOLVER = None
 # 新增：范围批处理工作进程，减少 IPC 与任务调度开销
+# 新增：单个谜底的静默求解核心逻辑
+def _solve_one_secret(solver: InteractiveNumleSolver, secret_arr: np.ndarray):
+    """
+    静默模式解算单个谜底，返回是否成功及尝试次数
+    """
+    # 预先构造一次 ASCII 字符串，避免循环内重复拼接
+    secret_str = (secret_arr + 48).tobytes().decode('ascii')
+
+    # 重置解算器状态以复用 all_combinations（不复制）
+    solver.possible_combinations = solver.all_combinations
+    attempt = 1
+    check_fn = InteractiveNumleSolver.check
+    L = solver.digit_length
+    while True:
+        guess = solver.get_next_guess()
+        if guess is None:
+            # 解算失败
+            return False, attempt
+        
+        result = check_fn(secret_str, guess)
+        total_correct = result['total_digits']
+        positions_correct = result['correct_positions']
+        
+        if positions_correct == L:
+            # 成功
+            return True, attempt
+            
+        solver.update_possible_combinations(guess, total_correct, positions_correct)
+        attempt += 1
+
+# 新增：范围批处理工作进程，减少 IPC 与任务调度开销
 def _solve_range_worker(args):
     """
     工作进程函数：处理 [start, end) 范围内的谜底索引，返回聚合统计
@@ -24,9 +55,7 @@ def _solve_range_worker(args):
             _G_SOLVER = solver
 
         all_secrets = solver.all_combinations
-        check_fn = InteractiveNumleSolver.check
-        L = solver.digit_length
-
+        
         processed = 0
         success_count = 0
         total_attempts = 0
@@ -34,27 +63,12 @@ def _solve_range_worker(args):
 
         for idx in range(start, end):
             secret_arr = all_secrets[idx]
-            # 预先构造一次 ASCII 字符串，避免循环内重复拼接
-            secret_str = (secret_arr + 48).tobytes().decode('ascii')
-
-            # 重置解算器状态以复用 all_combinations（不复制）
-            solver.possible_combinations = solver.all_combinations
-            attempt = 1
-            while True:
-                guess = solver.get_next_guess()
-                if guess is None:
-                    break
-                result = check_fn(secret_str, guess)
-                total_correct = result['total_digits']
-                positions_correct = result['correct_positions']
-                if positions_correct == L:
-                    success_count += 1
-                    total_attempts += attempt
-                    if attempt > max_attempts:
-                        max_attempts = attempt
-                    break
-                solver.update_possible_combinations(guess, total_correct, positions_correct)
-                attempt += 1
+            is_success, attempts = _solve_one_secret(solver, secret_arr)
+            if is_success:
+                success_count += 1
+                total_attempts += attempts
+                if attempts > max_attempts:
+                    max_attempts = attempts
             processed += 1
 
         return processed, success_count, total_attempts, max_attempts
@@ -132,6 +146,19 @@ def auto_solve(
         print(f"\n第 {attempt} 次猜测: {guess}")
         
         result = InteractiveNumleSolver.check(secret, guess)
+        total_correct = result['total_digits']
+        positions_correct = result['correct_positions']
+        print(f"结果: 包含数字: {total_correct}, 位置正确: {positions_correct}")
+
+        if positions_correct == length:
+            end_time = time.time()
+            print(f"\n成功！在 {attempt} 次猜测后找到答案: {secret}")
+            print(f"耗时: {end_time - start_time:.2f} 秒")
+            break
+        
+        solver.update_possible_combinations(guess, total_correct, positions_correct)
+        attempt += 1
+
 @app.command()
 def play(length: int = typer.Argument(5, help="数字长度")):
     """
@@ -194,31 +221,13 @@ def test(
     try:
         if processes is None or processes == 1:
             # 单进程
-            check_fn = InteractiveNumleSolver.check
-            L = solver.digit_length
             for secret in tqdm(all_secrets, desc="测试进度", unit="题"):
-                # 预先构造一次 ASCII 字符串，避免循环内重复拼接
-                secret_str = (secret + 48).tobytes().decode('ascii')
-                # 重置解算器状态（不复制）
-                solver.possible_combinations = solver.all_combinations
-                attempt = 1
-                while True:
-                    guess = solver.get_next_guess()
-                    if guess is None:
-                        break
-                    result = check_fn(secret_str, guess)
-                    total_correct = result['total_digits']
-                    positions_correct = result['correct_positions']
-                    
-                    if positions_correct == L:
-                        success_count += 1
-                        total_attempts += attempt
-                        if attempt > max_attempts:
-                            max_attempts = attempt
-                        break
-                        
-                    solver.update_possible_combinations(guess, total_correct, positions_correct)
-                    attempt += 1
+                is_success, attempts = _solve_one_secret(solver, secret)
+                if is_success:
+                    success_count += 1
+                    total_attempts += attempts
+                    if attempts > max_attempts:
+                        max_attempts = attempts
                 processed += 1
         else:
             # 多进程：基于索引区间分发任务，避免传输大数组切片；并复用父进程预热的 Solver
