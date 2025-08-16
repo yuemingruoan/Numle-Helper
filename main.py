@@ -256,78 +256,68 @@ def test(
     print(f"预热完成，耗时: {end_time - start_time:.2f} 秒。")
     print(f"预计算出的最佳首次猜测: {''.join(map(str, first_guess_arr))}")
 
-    # 执行主计算
+    # --- 执行主计算 ---
     start_time = time.time()
     results = np.empty((total_tests, 2), dtype=np.int32)
+    results.fill(-1)
     
-    if parallel:
-        # Numba 并行模式 + TQDM
-        print("正在执行并行计算...")
-        # 初始化 results 数组，使用 -1 作为未完成任务的标记
-        results.fill(-1)
+    target_func = _test_all_nb if parallel else _test_all_nb_single_thread
+    desc = "并行测试进度" if parallel else "单线程测试进度"
 
-        # 在工作线程中运行 Numba 计算
-        worker = threading.Thread(target=_test_all_nb, args=(all_secrets, results, first_guess_arr))
-        worker.start()
-
-        # 主线程使用 tqdm 更新进度
-        with tqdm(total=total_tests, desc="并行测试进度") as pbar:
+    worker = threading.Thread(target=target_func, args=(all_secrets, results, first_guess_arr))
+    worker.daemon = True  # 设置为守护线程，以便主线程退出时可以强制终止
+    worker.start()
+    
+    interrupted = False
+    try:
+        with tqdm(total=total_tests, desc=desc) as pbar:
             while worker.is_alive():
                 processed = np.sum(results[:, 1] != -1)
                 pbar.update(processed - pbar.n)
-                time.sleep(0.1)
-            # 确保进度条在最后能达到100%
+                time.sleep(0.1)  # 短暂休眠以降低 CPU 占用
+            # 确保在计算结束后，进度条能更新到100%
             processed = np.sum(results[:, 1] != -1)
             pbar.update(processed - pbar.n)
-        
-        worker.join()
-        
-    else:
-        # 单线程 Numba 模式 + TQDM
-        print("正在执行单线程计算 (Numba 核心)...")
-        results.fill(-1)
-
-        # 在工作线程中运行 Numba 计算
-        worker = threading.Thread(target=_test_all_nb_single_thread, args=(all_secrets, results, first_guess_arr))
-        worker.start()
-
-        # 主线程使用 tqdm 更新进度
-        with tqdm(total=total_tests, desc="单线程测试进度") as pbar:
-            while worker.is_alive():
-                processed = np.sum(results[:, 1] != -1)
-                pbar.update(processed - pbar.n)
-                time.sleep(0.1)
-            # 确保进度条在最后能达到100%
-            processed = np.sum(results[:, 1] != -1)
-            pbar.update(processed - pbar.n)
-        
-        worker.join()
-
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\n\n测试被用户中断。正在处理已完成部分的结果...")
+    
     end_time = time.time()
     total_time = end_time - start_time
-    print("计算完成。")
+    if not interrupted:
+        print("计算完成。")
 
-    # 结果统计 (使用 Numpy 高效完成)
+    # --- 结果统计 ---
+    total_processed = int(np.sum(results[:, 1] != -1))
+
+    if total_processed == 0:
+        print("警告：没有完成任何测试。")
+        raise typer.Exit(code=1)
+    
     success_mask = results[:, 0] == 1
     success_count = np.sum(success_mask)
     
-    print(f"\n测试完成！结果:")
-    print(f"测试总数: {total_tests}")
+    print(f"\n--- 测试结果 ---")
+    print(f"原定测试总数: {total_tests}")
+    print(f"已完成测试数: {total_processed} ({total_processed / total_tests * 100:.2f}%)")
     print(f"成功次数: {success_count}")
     
-    if total_tests > 0:
-        print(f"成功率: {success_count / total_tests * 100:.2f}%")
+    if total_processed > 0:
+        success_rate = success_count / total_processed * 100 if total_processed > 0 else 0
+        print(f"成功率 (基于已完成部分): {success_rate:.2f}%")
         
     if success_count > 0:
         successful_attempts = results[success_mask, 1]
-        total_attempts = np.sum(successful_attempts)
+        total_attempts_sum = np.sum(successful_attempts)
         max_attempts = np.max(successful_attempts)
-        print(f"平均猜测次数: {total_attempts / success_count:.2f}")
+        avg_attempts = total_attempts_sum / success_count if success_count > 0 else 0
+        print(f"平均猜测次数: {avg_attempts:.2f}")
         print(f"最高猜测次数: {max_attempts}")
         
     print(f"总耗时: {total_time:.2f}秒")
-    if total_tests > 0:
-        print(f"平均每个测试耗时: {total_time / total_tests:.4f}秒")
+    if total_processed > 0:
+        time_per_test = total_time / total_processed if total_processed > 0 else 0
+        print(f"平均每个测试耗时: {time_per_test:.4f}秒")
 
 if __name__ == "__main__":
     app()
