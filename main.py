@@ -1,19 +1,10 @@
-import typer
-from interactive_numle_solver import (
-    InteractiveNumleSolver, _check_nb, _calculate_entropies_nb, _filter_combinations_nb
-)
-import time
-import threading
-import numpy as np
-import numba
-from tqdm import tqdm
-
 # ======================================================================================
 # Numba JIT 优化的核心求解器
 # ======================================================================================
 
+import typer
 from interactive_numle_solver import (
-    InteractiveNumleSolver, _check_nb, _calculate_entropies_nb, _filter_combinations_nb,
+    InteractiveNumleSolver, _check_nb, _calculate_entropies_nb,
     _calculate_entropies_nb_masked, _filter_combinations_nb_inplace
 )
 import time
