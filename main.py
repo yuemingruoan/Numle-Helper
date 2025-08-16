@@ -12,49 +12,88 @@ from tqdm import tqdm
 # Numba JIT 优化的核心求解器
 # ======================================================================================
 
+from interactive_numle_solver import (
+    InteractiveNumleSolver, _check_nb, _calculate_entropies_nb, _filter_combinations_nb,
+    _calculate_entropies_nb_masked, _filter_combinations_nb_inplace
+)
+import time
+import threading
+import numpy as np
+import numba
+from tqdm import tqdm
+
+# ======================================================================================
+# Numba JIT 优化的核心求解器
+# ======================================================================================
+
 @numba.njit(cache=True)
-def _solve_one_secret_nb(all_combinations, secret_arr):
+def _solve_one_secret_nb(all_combinations, secret_arr, first_guess_arr=None):
     """
     Numba JIT: 静默模式解算单个谜底，返回是否成功及尝试次数
-    - 直接操作 numpy 数组，无 Python 对象开销
+    - 使用 mask 避免数组复制，性能更高
+    - 接受可选的 first_guess_arr 以免重复计算
     """
     L = all_combinations.shape[1]
-    possible_combinations = all_combinations.copy() # 每个求解过程有自己的独立副本
+    n_combinations = all_combinations.shape[0]
+    
+    # 使用掩码代替数组复制
+    mask = np.ones(n_combinations, dtype=np.bool_)
+    
+    # 初始化 guess_arr 以消除 Pylance 警告
+    guess_arr = all_combinations[0]
     
     attempt = 1
     while True:
-        # 1. 获取猜测 (内联 get_next_guess 逻辑)
-        if len(possible_combinations) == 0:
+        # 1. 获取猜测
+        possible_count = np.sum(mask)
+        if possible_count == 0:
             return False, attempt # 解算失败
 
-        entropies = _calculate_entropies_nb(possible_combinations, L)
-        best_idx = np.argmax(entropies)
-        guess_arr = possible_combinations[best_idx]
+        # 如果是第一次尝试且提供了预计算的猜测，直接使用
+        if attempt == 1 and first_guess_arr is not None:
+            guess_arr = first_guess_arr
+        # 如果只剩一个可能性，直接猜它，无需计算熵
+        elif possible_count == 1:
+            # 找到那个唯一的 True
+            for i in range(n_combinations):
+                if mask[i]:
+                    guess_arr = all_combinations[i]
+                    break
+        else:
+            # 计算熵并找到最佳猜测
+            entropies = _calculate_entropies_nb_masked(all_combinations, mask, L)
+            # 在所有可能性中找到熵最高的
+            best_idx = -1
+            max_entropy = -1.0
+            for i in range(n_combinations):
+                if mask[i] and entropies[i] > max_entropy:
+                    max_entropy = entropies[i]
+                    best_idx = i
+            guess_arr = all_combinations[best_idx]
 
-        # 2. 检查 (内联 check 逻辑)
+        # 2. 检查
         total_correct, positions_correct = _check_nb(secret_arr, guess_arr)
         
         if positions_correct == L:
             return True, attempt # 成功
             
-        # 3. 更新可能性 (内联 update_possible_combinations 逻辑)
-        mask = _filter_combinations_nb(
-            possible_combinations, guess_arr, total_correct, positions_correct
+        # 3. 原地更新掩码
+        _filter_combinations_nb_inplace(
+            mask, all_combinations, guess_arr, total_correct, positions_correct
         )
-        possible_combinations = possible_combinations[mask]
         
         attempt += 1
 
 @numba.njit(parallel=True, cache=True)
-def _test_all_nb(all_combinations, results):
+def _test_all_nb(all_combinations, results, first_guess_arr):
     """
     Numba JIT (并行模式): 测试所有组合
-    直接在传入的 results 数组上修改，方便外部跟踪进度
+    - 接收预先计算好的 first_guess_arr
     """
     n_tests = len(all_combinations)
     for i in numba.prange(n_tests):
         secret = all_combinations[i]
-        is_success, attempts = _solve_one_secret_nb(all_combinations, secret)
+        is_success, attempts = _solve_one_secret_nb(all_combinations, secret, first_guess_arr)
         results[i, 0] = is_success
         results[i, 1] = attempts
 
@@ -217,44 +256,51 @@ def test(
     # Numba JIT 预热
     print("Numba JIT 预热中...")
     start_time = time.time()
-    # 预热时传入一个空的 results 数组
+    
+    # 预热时需要计算首猜
+    entropies = _calculate_entropies_nb(all_secrets, length)
+    first_guess_idx = np.argmax(entropies)
+    first_guess_arr = all_secrets[first_guess_idx]
+    
+    # 预热 JIT 函数
     dummy_results = np.empty((1, 2), dtype=np.int32)
-    if parallel:
-        _test_all_nb(all_secrets[:1], dummy_results)
-    else:
-        _solve_one_secret_nb(all_secrets, all_secrets[0])
+    _test_all_nb(all_secrets[:1], dummy_results, first_guess_arr) # 并行预热
+    _solve_one_secret_nb(all_secrets, all_secrets[0], first_guess_arr) # 单线程预热
+
     end_time = time.time()
     print(f"预热完成，耗时: {end_time - start_time:.2f} 秒。")
+    print(f"预计算出的最佳首次猜测: {''.join(map(str, first_guess_arr))}")
 
     # 执行主计算
     start_time = time.time()
+    results = np.empty((total_tests, 2), dtype=np.int32)
     
     if parallel:
-        # Numba 并行模式 + 原生进度条
+        # Numba 并行模式 + TQDM
         print("正在执行并行计算...")
         # 初始化 results 数组，使用 -1 作为未完成任务的标记
-        results = np.full((total_tests, 2), -1, dtype=np.int32)
-        
+        results.fill(-1)
+
         # 在工作线程中运行 Numba 计算
-        worker = threading.Thread(target=_test_all_nb, args=(all_secrets, results))
+        worker = threading.Thread(target=_test_all_nb, args=(all_secrets, results, first_guess_arr))
         worker.start()
-        
-        # 主线程负责更新进度
-        while worker.is_alive():
-            # 通过检查标记值来计算已完成的任务数
+
+        # 主线程使用 tqdm 更新进度
+        with tqdm(total=total_tests, desc="并行测试进度") as pbar:
+            while worker.is_alive():
+                processed = np.sum(results[:, 1] != -1)
+                pbar.update(processed - pbar.n)
+                time.sleep(0.1)
+            # 确保进度条在最后能达到100%
             processed = np.sum(results[:, 1] != -1)
-            print(f"\r进度: {processed}/{total_tests}", end="")
-            time.sleep(0.2)
+            pbar.update(processed - pbar.n)
         
         worker.join()
-        # 确保最终进度显示为 100%
-        print(f"\r进度: {total_tests}/{total_tests}")
-
+        
     else:
         # 单线程 tqdm 模式
-        results = np.empty((total_tests, 2), dtype=np.int32)
         for i in tqdm(range(total_tests), desc="测试进度", unit="题"):
-            is_success, attempts = _solve_one_secret_nb(all_secrets, all_secrets[i])
+            is_success, attempts = _solve_one_secret_nb(all_secrets, all_secrets[i], first_guess_arr)
             results[i, 0] = is_success
             results[i, 1] = attempts
 

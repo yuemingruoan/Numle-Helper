@@ -100,6 +100,78 @@ def _filter_combinations_nb(combinations, guess_arr, total_correct, positions_co
     # 返回最终的布尔掩码
     return mask
 
+
+@numba.njit(cache=True)
+def _calculate_entropies_nb_masked(candidates, mask, L):
+    """Numba JIT: 根据掩码计算候选组合的信息熵"""
+    N = np.sum(mask)
+    if N == 0:
+        return np.zeros(len(candidates), dtype=np.float32)
+
+    counts = np.zeros((L, 10), dtype=np.int32)
+    for i in range(len(candidates)):
+        if mask[i]:
+            comb = candidates[i]
+            for j in range(L):
+                counts[j, comb[j]] += 1
+
+    freq = counts / float(N)
+    contrib = np.zeros_like(freq, dtype=np.float32)
+    for i in range(L):
+        for j in range(10):
+            if freq[i, j] > 0:
+                contrib[i, j] = -freq[i, j] * np.log2(freq[i, j])
+
+    entropies = np.zeros(len(candidates), dtype=np.float32)
+    for i in range(len(candidates)):
+        if mask[i]:
+            e = 0.0
+            comb = candidates[i]
+            for j in range(L):
+                e += contrib[j, comb[j]]
+            entropies[i] = e
+            
+    return entropies
+
+@numba.njit(cache=True)
+def _filter_combinations_nb_inplace(mask, combinations, guess_arr, total_correct, positions_correct):
+    """Numba JIT: 原地过滤不满足条件的组合 (修改 mask)"""
+    n_combinations, L = combinations.shape
+    
+    guess_counts = np.zeros(10, dtype=np.int32)
+    for i in range(L):
+        guess_counts[guess_arr[i]] += 1
+        
+    comb_counts = np.zeros(10, dtype=np.int32)
+
+    for i in range(n_combinations):
+        if not mask[i]:
+            continue
+
+        comb = combinations[i]
+        
+        # 1. 检查位置正确数
+        pos_correct_count = 0
+        for j in range(L):
+            if comb[j] == guess_arr[j]:
+                pos_correct_count += 1
+        
+        if pos_correct_count != positions_correct:
+            mask[i] = False
+            continue
+
+        # 2. 检查数字正确数
+        for k in range(10): comb_counts[k] = 0
+        for j in range(L):
+            comb_counts[comb[j]] += 1
+            
+        total_correct_count = 0
+        for j in range(10):
+            total_correct_count += min(comb_counts[j], guess_counts[j])
+
+        if total_correct_count != total_correct:
+            mask[i] = False
+
 # ======================================================================================
 # 主类
 # ======================================================================================
