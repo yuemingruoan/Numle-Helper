@@ -1,4 +1,107 @@
 import numpy as np
+import numba
+
+# ======================================================================================
+# Numba JIT 优化的核心计算函数
+# ======================================================================================
+
+@numba.njit(cache=True)
+def _check_nb(s, g):
+    """Numba JIT: 检查 secret 和 guess"""
+    correct_positions = 0
+    for i in range(s.shape[0]):
+        if s[i] == g[i]:
+            correct_positions += 1
+
+    secret_counts = np.zeros(10, dtype=np.int32)
+    for i in range(s.shape[0]):
+        secret_counts[s[i]] += 1
+        
+    guess_counts = np.zeros(10, dtype=np.int32)
+    for i in range(g.shape[0]):
+        guess_counts[g[i]] += 1
+        
+    correct_digits = 0
+    for i in range(10):
+        correct_digits += min(secret_counts[i], guess_counts[i])
+        
+    return correct_digits, correct_positions
+
+@numba.njit(cache=True)
+def _calculate_entropies_nb(candidates, L):
+    """Numba JIT: 计算所有候选组合的信息熵"""
+    N = len(candidates)
+    
+    # 统计每一列(位置)的数字分布
+    counts = np.zeros((L, 10), dtype=np.int32)
+    for i in range(L):
+        for j in range(N):
+            counts[i, candidates[j, i]] += 1
+
+    # 概率与信息贡献表
+    freq = counts / float(N)
+    contrib = np.zeros_like(freq, dtype=np.float32)
+    for i in range(L):
+        for j in range(10):
+            if freq[i, j] > 0:
+                contrib[i, j] = -freq[i, j] * np.log2(freq[i, j])
+
+    # 对所有候选计算熵
+    entropies = np.zeros(N, dtype=np.float32)
+    for i in range(N):
+        e = 0.0
+        for j in range(L):
+            e += contrib[j, candidates[i, j]]
+        entropies[i] = e
+        
+    return entropies
+
+@numba.njit(cache=True)
+def _filter_combinations_nb(combinations, guess_arr, total_correct, positions_correct):
+    """Numba JIT: 过滤不满足条件的组合"""
+    n_combinations, L = combinations.shape
+    
+    # 预分配掩码数组
+    mask = np.ones(n_combinations, dtype=np.bool_)
+    
+    # 临时计数数组
+    comb_counts = np.zeros(10, dtype=np.int32)
+    guess_counts = np.zeros(10, dtype=np.int32)
+    for i in range(guess_arr.shape[0]):
+        guess_counts[guess_arr[i]] += 1
+
+    for i in range(n_combinations):
+        comb = combinations[i]
+        
+        # 1. 检查位置正确数
+        pos_correct_count = 0
+        for j in range(L):
+            if comb[j] == guess_arr[j]:
+                pos_correct_count += 1
+        
+        if pos_correct_count != positions_correct:
+            mask[i] = False
+            continue
+
+        # 2. 检查数字正确数
+        # 重置并计算当前组合的数字分布
+        for k in range(10): comb_counts[k] = 0
+        for j in range(L):
+            comb_counts[comb[j]] += 1
+            
+        total_correct_count = 0
+        for j in range(10):
+            total_correct_count += min(comb_counts[j], guess_counts[j])
+
+        if total_correct_count != total_correct:
+            mask[i] = False
+            
+    # 返回最终的布尔掩码
+    return mask
+
+# ======================================================================================
+# 主类
+# ======================================================================================
 
 class InteractiveNumleSolver:
     def __init__(self, digit_length=5):
@@ -13,91 +116,50 @@ class InteractiveNumleSolver:
         return np.stack(grids, axis=-1).reshape(-1, self.digit_length)
     
     def get_next_guess(self):
-        """获取下一个猜测（全向量化评分）"""
+        """获取下一个猜测（调用 Numba JIT 核心）"""
         if len(self.possible_combinations) == 0:
-            # 直接复用基表，避免不必要的 copy
             self.possible_combinations = self.all_combinations
             
         if len(self.possible_combinations) == 0:
             return None
 
-        # 候选全集
         candidates = self.possible_combinations
-
-        # 统计每一列(位置)的数字分布: counts[pos, digit] in [0..N]
-        L = self.digit_length
-        N = len(candidates)
-        counts = np.empty((L, 10), dtype=np.int32)
-        for i in range(L):
-            counts[i] = np.bincount(candidates[:, i], minlength=10)
-
-        # 概率与信息贡献表 contrib[pos, digit] = -p*log2(p); p=0 时贡献 0
-        freq = counts.astype(np.float32) / float(N)
-        contrib = np.zeros_like(freq, dtype=np.float32)
-        mask = freq > 0
-        contrib[mask] = -freq[mask] * np.log2(freq[mask])
-
-        # 对所有候选一次性取出其在每个位置的贡献并求和
-        entropies = contrib[np.arange(L)[:, None], candidates.T].sum(axis=0)
+        
+        # 调用 Numba JIT 函数计算熵
+        entropies = _calculate_entropies_nb(candidates, self.digit_length)
 
         best_idx = int(np.argmax(entropies))
         return ''.join(map(str, candidates[best_idx]))
         
     @staticmethod
     def check(secret, guess):
-        """检查模式（高效字符串转数字与矢量化计数）"""
-        # 假定仅含 0-9 字符；若格式不正确可在调用端校验
+        """检查模式（调用 Numba JIT 核心）"""
+        if len(secret) != len(guess):
+            raise ValueError("秘密数字和猜测数字长度不一致")
+            
         s = np.frombuffer(secret.encode('ascii'), dtype=np.uint8) - 48
         g = np.frombuffer(guess.encode('ascii'), dtype=np.uint8) - 48
-
-        if s.size != g.size:
-            raise ValueError("秘密数字和猜测数字长度不一致")
-
-        correct_positions = int((s == g).sum())
-
-        secret_counts = np.bincount(s, minlength=10)
-        guess_counts = np.bincount(g, minlength=10)
-        correct_digits = int(np.minimum(secret_counts, guess_counts).sum())
+        
+        total_digits, correct_positions = _check_nb(s, g)
 
         return {
-            "total_digits": correct_digits,
+            "total_digits": total_digits,
             "correct_positions": correct_positions
         }
     
     def update_possible_combinations(self, guess, total_correct, positions_correct):
-        """更新可能数字组合（全向量化过滤）"""
+        """更新可能数字组合（调用 Numba JIT 核心）"""
         if len(self.possible_combinations) == 0:
             return
 
         guess_arr = np.frombuffer(guess.encode('ascii'), dtype=np.uint8) - 48
-
-        # 先用“位置正确数”做早期裁剪，减少后续工作量
-        correct_positions = (self.possible_combinations == guess_arr).sum(axis=1)
-        pos_mask = (correct_positions == positions_correct)
-        if not np.any(pos_mask):
-            # 无匹配，直接置空
-            self.possible_combinations = self.possible_combinations[:0]
-            return
-
-        cand = self.possible_combinations[pos_mask]
-        N, L = cand.shape
-
-        # 为每行构建 0..9 的计数：使用单次 np.bincount 完成
-        rows = np.repeat(np.arange(N), L)
-        vals = cand.reshape(-1)
-        idx = rows * 10 + vals
-        counts_flat = np.bincount(idx, minlength=N * 10)
-        secret_counts = counts_flat.reshape(N, 10)
-
-        guess_counts = np.bincount(guess_arr, minlength=10)
-
-        total_digits = np.minimum(secret_counts, guess_counts).sum(axis=1)
-
-        mask = (total_digits == total_correct)
-
-        # 组合位置掩码与数字掩码
-        final = np.where(pos_mask)[0][mask]
-        self.possible_combinations = self.possible_combinations[final]
+        
+        # 调用 Numba JIT 函数进行过滤
+        mask = _filter_combinations_nb(
+            self.possible_combinations, guess_arr, total_correct, positions_correct
+        )
+        
+        self.possible_combinations = self.possible_combinations[mask]
     
     def solve_interactive(self, max_attempts=6):
         """交互式求解主函数"""

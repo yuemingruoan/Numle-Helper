@@ -1,60 +1,76 @@
 import typer
-from interactive_numle_solver import InteractiveNumleSolver
+from interactive_numle_solver import (
+    InteractiveNumleSolver, _check_nb, _calculate_entropies_nb, _filter_combinations_nb
+)
 import time
 import sys
 import multiprocessing as mp
 from tqdm import tqdm
 import numpy as np
+import numba
 
-# 进程内全局 Solver 缓存，用于复用生成的大规模组合，降低任务初始化开销
-_G_SOLVER = None
-# 新增：范围批处理工作进程，减少 IPC 与任务调度开销
-# 新增：单个谜底的静默求解核心逻辑
-def _solve_one_secret(solver: InteractiveNumleSolver, secret_arr: np.ndarray):
-    """
-    静默模式解算单个谜底，返回是否成功及尝试次数
-    """
-    # 预先构造一次 ASCII 字符串，避免循环内重复拼接
-    secret_str = (secret_arr + 48).tobytes().decode('ascii')
+# ======================================================================================
+# Numba JIT 优化的核心求解器
+# ======================================================================================
 
-    # 重置解算器状态以复用 all_combinations（不复制）
-    solver.possible_combinations = solver.all_combinations
+@numba.njit(cache=True)
+def _solve_one_secret_nb(all_combinations, secret_arr):
+    """
+    Numba JIT: 静默模式解算单个谜底，返回是否成功及尝试次数
+    - 直接操作 numpy 数组，无 Python 对象开销
+    """
+    L = all_combinations.shape[1]
+    possible_combinations = all_combinations.copy() # 每个求解过程有自己的独立副本
+    
     attempt = 1
-    check_fn = InteractiveNumleSolver.check
-    L = solver.digit_length
     while True:
-        guess = solver.get_next_guess()
-        if guess is None:
-            # 解算失败
-            return False, attempt
-        
-        result = check_fn(secret_str, guess)
-        total_correct = result['total_digits']
-        positions_correct = result['correct_positions']
+        # 1. 获取猜测 (内联 get_next_guess 逻辑)
+        if len(possible_combinations) == 0:
+            return False, attempt # 解算失败
+
+        entropies = _calculate_entropies_nb(possible_combinations, L)
+        best_idx = np.argmax(entropies)
+        guess_arr = possible_combinations[best_idx]
+
+        # 2. 检查 (内联 check 逻辑)
+        total_correct, positions_correct = _check_nb(secret_arr, guess_arr)
         
         if positions_correct == L:
-            # 成功
-            return True, attempt
+            return True, attempt # 成功
             
-        solver.update_possible_combinations(guess, total_correct, positions_correct)
+        # 3. 更新可能性 (内联 update_possible_combinations 逻辑)
+        mask = _filter_combinations_nb(
+            possible_combinations, guess_arr, total_correct, positions_correct
+        )
+        possible_combinations = possible_combinations[mask]
+        
         attempt += 1
 
-# 新增：范围批处理工作进程，减少 IPC 与任务调度开销
+# ======================================================================================
+# Python 侧的包装与工作流
+# ======================================================================================
+
+# 进程内全局 Solver 缓存
+_G_SOLVER = None
+
+def _solve_one_secret(solver: InteractiveNumleSolver, secret_arr: np.ndarray):
+    """
+    静默求解的 Python 包装器，调用 Numba JIT 核心
+    """
+    # 直接调用 JIT 函数
+    return _solve_one_secret_nb(solver.all_combinations, secret_arr)
+
 def _solve_range_worker(args):
     """
-    工作进程函数：处理 [start, end) 范围内的谜底索引，返回聚合统计
-    返回: (processed, success_count, total_attempts, max_attempts)
+    工作进程函数：处理 [start, end) 范围内的谜底索引
     """
     try:
         start, end, length = args
         global _G_SOLVER
-        solver = _G_SOLVER
-        if solver is None or getattr(solver, "digit_length", None) != length:
-            # 若父进程未预热或长度不匹配，则在子进程按需构建
-            solver = InteractiveNumleSolver(length)
-            _G_SOLVER = solver
+        if _G_SOLVER is None or getattr(_G_SOLVER, "digit_length", None) != length:
+            _G_SOLVER = InteractiveNumleSolver(length)
 
-        all_secrets = solver.all_combinations
+        all_secrets = _G_SOLVER.all_combinations
         
         processed = 0
         success_count = 0
@@ -63,7 +79,8 @@ def _solve_range_worker(args):
 
         for idx in range(start, end):
             secret_arr = all_secrets[idx]
-            is_success, attempts = _solve_one_secret(solver, secret_arr)
+            # 直接调用 JIT 函数
+            is_success, attempts = _solve_one_secret_nb(all_secrets, secret_arr)
             if is_success:
                 success_count += 1
                 total_attempts += attempts
@@ -221,8 +238,9 @@ def test(
     try:
         if processes is None or processes == 1:
             # 单进程
+            # 单进程模式也直接调用 JIT 函数
             for secret in tqdm(all_secrets, desc="测试进度", unit="题"):
-                is_success, attempts = _solve_one_secret(solver, secret)
+                is_success, attempts = _solve_one_secret_nb(all_secrets, secret)
                 if is_success:
                     success_count += 1
                     total_attempts += attempts
@@ -230,22 +248,25 @@ def test(
                         max_attempts = attempts
                 processed += 1
         else:
-            # 多进程：基于索引区间分发任务，避免传输大数组切片；并复用父进程预热的 Solver
+            # 多进程
             procs = mp.cpu_count() if processes in (0, -1) else max(1, processes)
-            procs = min(procs, total_tests)  # 不要创建多于任务数量的进程
+            procs = min(procs, total_tests)
 
-            # 预热：将父进程已构造的 Solver 通过 fork 共享到子进程，避免子进程重复构建基表
+            # Numba JIT 预热：在主进程中编译一次，子进程通过 fork 继承已编译的代码
+            print("Numba JIT 预热中...")
+            dummy_secret = all_secrets[0]
+            _solve_one_secret_nb(all_secrets, dummy_secret)
+            print("预热完成。")
+
             global _G_SOLVER
             _G_SOLVER = solver
 
-            # 计算批大小：用户传入优先；否则自动估算为约 procs*4 个批次
             if chunksize and chunksize > 0:
                 batch_size = int(chunksize)
             else:
                 target_tasks = max(procs * 4, 1)
                 batch_size = max(1, (total_tests + target_tasks - 1) // target_tasks)
 
-            # 构造索引区间任务
             tasks = []
             for start_idx in range(0, total_tests, batch_size):
                 end_idx = min(start_idx + batch_size, total_tests)
@@ -254,9 +275,7 @@ def test(
             with mp.get_context("fork").Pool(processes=procs) as pool:
                 with tqdm(total=total_tests, desc="测试进度", unit="题") as pbar:
                     for processed_i, success_i, attempts_i, max_attempts_i in pool.imap_unordered(
-                        _solve_range_worker,
-                        tasks,
-                        chunksize=1,
+                        _solve_range_worker, tasks, chunksize=1
                     ):
                         processed += processed_i
                         pbar.update(processed_i)
