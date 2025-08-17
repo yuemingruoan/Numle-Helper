@@ -236,6 +236,8 @@ def test(
 
     print("\n开始自动遍历测试...")
     print(f"数字长度: {length}, 总测试数: {total_tests}, 并行计算: {'启用' if parallel else '禁用'}")
+    if parallel:
+        print(f"Numba 并行数量: {numba.get_num_threads()}")
 
     # Numba JIT 预热
     print("Numba JIT 预热中...")
@@ -288,36 +290,82 @@ def test(
         print("计算完成。")
 
     # --- 结果统计 ---
-    total_processed = int(np.sum(results[:, 1] != -1))
+    processed_mask = results[:, 1] != -1
+    total_processed = int(np.sum(processed_mask))
 
     if total_processed == 0:
         print("警告：没有完成任何测试。")
         raise typer.Exit(code=1)
-    
-    success_mask = results[:, 0] == 1
+
+    # 在已处理的测试中筛选成功和失败
+    success_mask = (results[:, 0] == 1) & processed_mask
+    fail_mask = (results[:, 0] == 0) & processed_mask
+
     success_count = np.sum(success_mask)
-    
+    fail_count = np.sum(fail_mask)
+
     print(f"\n--- 测试结果 ---")
     print(f"原定测试总数: {total_tests}")
     print(f"已完成测试数: {total_processed} ({total_processed / total_tests * 100:.2f}%)")
-    print(f"成功次数: {success_count}")
     
-    if total_processed > 0:
-        success_rate = success_count / total_processed * 100 if total_processed > 0 else 0
+    if fail_count > 0:
+        print(f"失败次数: {fail_count}")
+        success_rate = success_count / total_processed * 100
         print(f"成功率 (基于已完成部分): {success_rate:.2f}%")
-        
+
     if success_count > 0:
         successful_attempts = results[success_mask, 1]
-        total_attempts_sum = np.sum(successful_attempts)
+        avg_attempts = np.mean(successful_attempts)
         max_attempts = np.max(successful_attempts)
-        avg_attempts = total_attempts_sum / success_count if success_count > 0 else 0
+        
         print(f"平均猜测次数: {avg_attempts:.2f}")
         print(f"最高猜测次数: {max_attempts}")
+
+        # 猜测次数分布
+        print("\n猜测次数分布:")
+        # 使用bincount获得每个尝试次数的频率
+        attempts_distribution = np.bincount(successful_attempts)
+        for i, count in enumerate(attempts_distribution):
+            if i > 0 and count > 0: # 从1次开始，且次数大于0
+                percentage = count / success_count * 100
+                print(f"  {i} 次: {count:5d} 个 ({percentage:5.2f}%)")
         
-    print(f"总耗时: {total_time:.2f}秒")
+        # 找到需要最多次猜测的谜底
+        hardest_secrets_mask = (results[:, 1] == max_attempts) & success_mask
+        hardest_secrets_indices = np.where(hardest_secrets_mask)[0]
+        
+        display_limit = 5
+        print(f"\n需要 {max_attempts} 次猜测的谜底 (最多显示 {min(display_limit, len(hardest_secrets_indices))} 个):")
+        for i, secret_idx in enumerate(hardest_secrets_indices):
+            if i >= display_limit:
+                print(f"  ... (及其他 {len(hardest_secrets_indices) - display_limit} 个)")
+                break
+            secret_arr = all_secrets[secret_idx]
+            secret_str = ''.join(map(str, secret_arr))
+            print(f"  - {secret_str}")
+
+    if fail_count > 0:
+        failed_secrets_indices = np.where(fail_mask)[0]
+        display_limit = 5
+        print(f"\n失败的谜底 (最多显示 {min(display_limit, len(failed_secrets_indices))} 个):")
+        for i, secret_idx in enumerate(failed_secrets_indices):
+            if i >= display_limit:
+                print(f"  ... (及其他 {len(failed_secrets_indices) - display_limit} 个)")
+                break
+            secret_arr = all_secrets[secret_idx]
+            secret_str = ''.join(map(str, secret_arr))
+            failed_attempts = results[secret_idx, 1]
+            print(f"  - {secret_str} (在 {failed_attempts} 次尝试后失败)")
+
+    print(f"\n总耗时: {total_time:.2f}秒")
     if total_processed > 0:
-        time_per_test = total_time / total_processed if total_processed > 0 else 0
-        print(f"平均每个测试耗时: {time_per_test:.4f}秒")
+        total_guesses = np.sum(results[processed_mask, 1])
+        problems_per_second = total_processed / total_time
+        guesses_per_second = total_guesses / total_time
+        
+        print(f"平均每个测试耗时: {total_time / total_processed:.4f}秒")
+        print(f"每秒解题数 (TPS): {problems_per_second:.2f}")
+        print(f"每秒猜测数 (GPS): {guesses_per_second:.2f}")
 
 if __name__ == "__main__":
     app()
