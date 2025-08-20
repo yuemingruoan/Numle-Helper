@@ -235,10 +235,9 @@ def _test_all_nb(all_combinations, results, first_guess_arr):
         results[i, 0] = is_success
         results[i, 1] = attempts
 
-@numba.njit(cache=True, fastmath=True)
-def _test_all_nb_single_thread(all_combinations, results, first_guess_arr):
+def _test_all_nb_single_thread(all_combinations, results, first_guess_arr, progress_callback=None):
     """
-    Numba JIT (单线程): 测试所有组合，以消除 Python 循环开销
+    测试所有组合 (单线程)，支持进度更新
     """
     n_tests = len(all_combinations)
     for i in range(n_tests):
@@ -246,6 +245,10 @@ def _test_all_nb_single_thread(all_combinations, results, first_guess_arr):
         is_success, attempts = _solve_one_secret_nb(all_combinations, secret, first_guess_arr)
         results[i, 0] = is_success
         results[i, 1] = attempts
+        
+        # 如果提供了进度回调函数，则调用它
+        if progress_callback is not None:
+            progress_callback(i + 1)
 
 # ======================================================================================
 # 主类
@@ -380,7 +383,7 @@ class InteractiveNumleSolver:
         dummy_results = np.empty((1, 2), dtype=np.int32)
         _test_all_nb(all_secrets[:1], dummy_results, first_guess_arr) # 并行预热
         _solve_one_secret_nb(all_secrets, all_secrets[0], first_guess_arr) # 单核求解器预热
-        _test_all_nb_single_thread(all_secrets[:1], dummy_results, first_guess_arr) # 单线程测试循环预热
+        _test_all_nb_single_thread(all_secrets[:1], dummy_results, first_guess_arr, None) # 单线程测试循环预热
 
         end_time = time.time()
         print(f"预热完成，耗时: {end_time - start_time:.2f} 秒。")
@@ -391,25 +394,38 @@ class InteractiveNumleSolver:
         results = np.empty((total_tests, 2), dtype=np.int32)
         results.fill(-1)
         
-        target_func = _test_all_nb if parallel else _test_all_nb_single_thread
         desc = "并行测试进度" if parallel else "单线程测试进度"
-
-        worker = threading.Thread(target=target_func, args=(all_secrets, results, first_guess_arr))
-        worker.daemon = True
-        worker.start()
         
-        interrupted = False
-        try:
-            with tqdm(total=total_tests, desc=desc) as pbar:
-                while worker.is_alive():
+        if parallel:
+            # 并行模式使用原有逻辑
+            worker = threading.Thread(target=_test_all_nb, args=(all_secrets, results, first_guess_arr))
+            worker.daemon = True
+            worker.start()
+            
+            interrupted = False
+            try:
+                with tqdm(total=total_tests, desc=desc) as pbar:
+                    while worker.is_alive():
+                        processed = np.sum(results[:, 1] != -1)
+                        pbar.update(processed - pbar.n)
+                        time.sleep(0.1)
                     processed = np.sum(results[:, 1] != -1)
                     pbar.update(processed - pbar.n)
-                    time.sleep(0.1)
-                processed = np.sum(results[:, 1] != -1)
-                pbar.update(processed - pbar.n)
-        except KeyboardInterrupt:
-            interrupted = True
-            print("\n\n测试被用户中断。正在处理已完成部分的结果...")
+            except KeyboardInterrupt:
+                interrupted = True
+                print("\n\n测试被用户中断。正在处理已完成部分的结果...")
+        else:
+            # 非并行模式使用回调函数更新进度
+            with tqdm(total=total_tests, desc=desc) as pbar:
+                def progress_callback(processed):
+                    pbar.update(processed - pbar.n)
+                
+                interrupted = False
+                try:
+                    _test_all_nb_single_thread(all_secrets, results, first_guess_arr, progress_callback)
+                except KeyboardInterrupt:
+                    interrupted = True
+                    print("\n\n测试被用户中断。正在处理已完成部分的结果...")
         
         end_time = time.time()
         total_time = end_time - start_time
