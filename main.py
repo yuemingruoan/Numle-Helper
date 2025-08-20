@@ -147,7 +147,7 @@ def play(length: int = typer.Argument(5, help="数字长度")):
 @app.command()
 def test(
     length: int = typer.Option(5, "--length", "-l", help="数字长度"),
-    parallel: bool = typer.Option(True, "--parallel/--no-parallel", "-p", help="是否启用 Numba 并行计算"),
+    parallel: bool = typer.Option(False, "--parallel", "-p", help="是否启用 Numba 并行计算"),
 ):
     """
     测试模式：使用 Numba 自动遍历所有可能性。
